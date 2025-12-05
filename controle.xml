@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+
+    <TCP bind_addr="127.0.0.1" bind_port="7810"/>
+
+    <TCPPING initial_hosts="127.0.0.1[7810],127.0.0.1[7811]" port_range="2"/>
+
+    <MERGE3/>
+    <FD_SOCK/>
+    <FD_ALL/>
+    <VERIFY_SUSPECT/>
+    <CENTRAL_LOCK/>
+    <SEQUENCER/>
+    <pbcast.NAKACK2/>
+    <UNICAST3/>
+    <pbcast.STABLE/>
+    <pbcast.GMS print_local_addr="true"/>
+    <pbcast.STATE_TRANSFER/>
+
+    <!-- REMOVIDO <serialization> -->
+    <!-- REMOVIDO <SERIALIZATION> -->
+    <!-- REMOVIDO <FRAG2> -->
+
+</config>
