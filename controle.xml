@@ -1,20 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config>
 
-    <TCP bind_addr="127.0.0.1" bind_port="7810"/>
+    <!-- Canal TCP fixo para o cluster de CONTROLE -->
+    <TCP
+            bind_addr="127.0.0.1"
+            bind_port="7810"
+            recv_buf_size="20M"
+            send_buf_size="20M"
+            sock_conn_timeout="300"
+    />
 
-    <TCPPING initial_hosts="127.0.0.1[7810],127.0.0.1[7811]" port_range="2"/>
+    <!-- Descoberta estática: obrigatória para clusters sem multicast -->
+    <TCPPING
+            initial_hosts="127.0.0.1[7810],127.0.0.1[7811]"
+            port_range="5"
+    />
 
     <MERGE3/>
     <FD_SOCK/>
-    <FD_ALL/>
-    <VERIFY_SUSPECT/>
-    <CENTRAL_LOCK/>
+    <FD_ALL timeout="3000" interval="1000"/>
+    <VERIFY_SUSPECT timeout="1500"/>
 
-    <pbcast.NAKACK2/>
+    <!-- Ordenação total para replicação consistente -->
+    <SEQUENCER/>
+
+    <pbcast.NAKACK2 use_mcast_xmit="false"/>
     <UNICAST3/>
-    <pbcast.STABLE/>
-    <pbcast.GMS print_local_addr="true"/>
+    <pbcast.STABLE desired_avg_gossip="2000"/>
+
+    <pbcast.GMS print_local_addr="true" join_timeout="3000"/>
+
     <pbcast.STATE_TRANSFER/>
 
 </config>

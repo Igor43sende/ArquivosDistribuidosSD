@@ -8,10 +8,11 @@ public interface IControle {
 
     boolean autenticarUsuario(String nome, String senha);
 
-    // Alinhado com a implementação em ServidorControle
     String enviarArquivos(String nome, byte[] dados, String usuario);
 
-    // Alinhado com o método da implementação
+    // suporte ao update distribuído
+    boolean atualizarArquivo(String uid, byte[] novoConteudo);
+
     List<String> solicitarListagem(String usuario);
 
     byte[] downloadArquivo(String uid);
@@ -20,5 +21,6 @@ public interface IControle {
 
     List<String> buscarArquivos(String nome);
 
-    String obterHashEstado();
+    // ★★ HASH GLOBAL DO SISTEMA ★★
+    String obterHashGlobal();
 }

@@ -62,6 +62,18 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // ★ NOVO ★ — atualização de arquivo via RMI
+    @Override
+    public boolean atualizarArquivo(String uid, byte[] novoConteudo) throws RemoteException {
+        System.out.println("[Gateway] Requisição UPDATE para UID=" + uid);
+        try {
+            return servidorControle.atualizarArquivo(uid, novoConteudo);
+        } catch (Exception e) {
+            System.err.println("[Gateway] Erro no UPDATE do arquivo: " + e.getMessage());
+            throw new RemoteException("Falha no update", e);
+        }
+    }
+
     @Override
     public List<String> solicitarListagem(String nomeUsuario) throws RemoteException {
         try {
@@ -71,7 +83,6 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
             throw new RemoteException("Erro na listagem", e);
         }
     }
-
 
     @Override
     public byte[] downloadArquivo(String uid) throws RemoteException {
@@ -106,14 +117,15 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // ★★ HASH GLOBAL ★★ NO GATEWAY
     @Override
-    public String obterHashEstado() throws RemoteException {
-        System.out.println("[Gateway] Requisição: obterHashEstado()");
+    public String obterHashGlobal() throws RemoteException {
+        System.out.println("[Gateway] Requisição: obterHashGlobal()");
         try {
-            return servidorControle.obterHashEstado();
+            return servidorControle.obterHashGlobal();
         } catch (Exception e) {
-            System.err.println("[Gateway] Erro ao obter hash do estado: " + e.getMessage());
-            throw new RemoteException("Erro ao obter hash", e);
+            System.err.println("[Gateway] Erro ao obter hash global: " + e.getMessage());
+            throw new RemoteException("Erro ao obter hash global", e);
         }
     }
 }

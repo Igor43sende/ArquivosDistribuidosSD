@@ -12,6 +12,9 @@ public interface IGateway extends Remote {
 
     String enviarArquivos(String nome, byte[] dados, String usuarioLogado) throws RemoteException;
 
+    // ★ NOVO ★ — atualização distribuída de arquivo
+    boolean atualizarArquivo(String uid, byte[] novoConteudo) throws RemoteException;
+
     List<String> solicitarListagem(String usuarioLogado) throws RemoteException;
 
     byte[] downloadArquivo(String uid) throws RemoteException;
@@ -20,5 +23,6 @@ public interface IGateway extends Remote {
 
     List<String> buscarArquivos(String nome) throws RemoteException;
 
-    String obterHashEstado() throws RemoteException;
+    // ★★ NOVO — HASH GLOBAL DO SISTEMA ★★
+    String obterHashGlobal() throws RemoteException;
 }
