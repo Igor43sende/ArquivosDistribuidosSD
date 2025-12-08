@@ -11,6 +11,9 @@ public interface IControle {
     // Alinhado com a implementação em ServidorControle
     String enviarArquivos(String nome, byte[] dados, String usuario);
 
+    // ★ NOVO ★ — suporte ao update distribuído
+    boolean atualizarArquivo(String uid, byte[] novoConteudo);
+
     // Alinhado com o método da implementação
     List<String> solicitarListagem(String usuario);
 

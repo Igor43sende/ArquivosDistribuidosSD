@@ -62,6 +62,18 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // ★ NOVO ★ — atualização de arquivo via RMI
+    @Override
+    public boolean atualizarArquivo(String uid, byte[] novoConteudo) throws RemoteException {
+        System.out.println("[Gateway] Requisição UPDATE para UID=" + uid);
+        try {
+            return servidorControle.atualizarArquivo(uid, novoConteudo);
+        } catch (Exception e) {
+            System.err.println("[Gateway] Erro no UPDATE do arquivo: " + e.getMessage());
+            throw new RemoteException("Falha no update", e);
+        }
+    }
+
     @Override
     public List<String> solicitarListagem(String nomeUsuario) throws RemoteException {
         try {
@@ -71,7 +83,6 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
             throw new RemoteException("Erro na listagem", e);
         }
     }
-
 
     @Override
     public byte[] downloadArquivo(String uid) throws RemoteException {

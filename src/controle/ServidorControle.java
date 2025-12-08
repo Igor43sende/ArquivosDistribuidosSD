@@ -3,12 +3,14 @@ package controle;
 import dados.Arquivo;
 
 import org.jgroups.*;
-import org.jgroups.blocks.locking.LockService;
 
-import java.util.concurrent.locks.Lock;
 import java.util.UUID;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Queue;
+import java.util.LinkedList;
 
 import util.PersistenciaUtil;
 
@@ -18,21 +20,27 @@ import java.io.OutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
-import java.util.concurrent.TimeUnit;
-
 public class ServidorControle extends ReceiverAdapter implements IControle {
 
     private JChannel canal;          // cluster de controle
     private JChannel canalDados;     // cluster de dados
 
     private ListaUsuarios listaUsuarios;
-    private LockService lockService;
 
     private List<String> ultimaRespostaListagem = new ArrayList<>();
     // Pode receber byte[] (conteúdo), String (mensagem de erro/not found) ou outro objeto
     private Object ultimaRespostaDownload = null;
     private final Object responseLock = new Object();
     private static final String CAMINHO_ESTADO_CONTROLE = "estado_controle.bin";
+
+    // ---- Estruturas para lock distribuído (protocolo próprio) ----
+    // Tabelas usadas pelo coordenador do cluster de controle
+    private final Map<String, Address> lockOwners = new HashMap<>();
+    private final Map<String, Queue<Address>> lockFilas = new HashMap<>();
+
+    // Estruturas usadas localmente em cada nó para aguardar LOCK_GRANTED
+    private final Map<String, Object> monitoresLock = new HashMap<>();
+    private final Map<String, Boolean> lockConcedido = new HashMap<>();
 
     public ServidorControle() {
         this.listaUsuarios = new ListaUsuarios();
@@ -46,8 +54,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         canal.setReceiver(new ReceiverControle());
         canal.connect("ClusterControle");
         System.out.println("[CONTROLE] Canal CONTROLE conectado: " + canal.getAddress());
-
-        lockService = new LockService(canal);
 
         canalDados = new JChannel("dados.xml");
         canalDados.setReceiver(new ReceiverDados());
@@ -86,12 +92,13 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     @Override
     public String enviarArquivos(String nomeArquivo, byte[] conteudo, String usuario) {
         String chaveLock = "file:name:" + nomeArquivo;
-        Lock lock = lockService.getLock(chaveLock);
-        boolean acquired = false;
-        try {
-            acquired = lock.tryLock(5, TimeUnit.SECONDS);
-            if (!acquired) return "Outro usuário está acessando esse nome de arquivo.";
 
+        boolean acquired = adquirirLockDistribuido(chaveLock, 5000);
+        if (!acquired) {
+            return "Outro usuário está acessando esse nome de arquivo.";
+        }
+
+        try {
             String uid = UUID.randomUUID().toString();
             Arquivo arquivo = new Arquivo(uid, nomeArquivo, conteudo, usuario);
 
@@ -110,7 +117,45 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         } catch (Exception e) {
             return "Erro ao enviar arquivo: " + e.getMessage();
         } finally {
-            if (acquired) lock.unlock();
+            liberarLockDistribuido(chaveLock);
+        }
+    }
+
+    // ★ NOVO ★ — implementação do UPDATE distribuído
+    @Override
+    public boolean atualizarArquivo(String uid, byte[] novoConteudo) {
+        // Lock por UID para evitar updates concorrentes no mesmo arquivo
+        String chaveLock = "file:uid:" + uid;
+
+        boolean acquired = adquirirLockDistribuido(chaveLock, 5000);
+        if (!acquired) {
+            System.err.println("[CONTROLE][UPDATE] Não foi possível adquirir lock para UID=" + uid);
+            return false;
+        }
+
+        try {
+            long ts = System.currentTimeMillis();
+
+            // Nome e usuário podem ser null — o ServidorDados usa os metadados antigos
+            Arquivo atualizado = new Arquivo(uid, null, novoConteudo, null);
+            atualizado.setUpdate(true);
+            atualizado.setTimestamp(ts);
+
+            Address dest = canalDados.getView().getMembers().get(0);
+            if (dest != null) {
+                canalDados.send(new Message(dest, atualizado));
+            } else {
+                canalDados.send(new Message(null, atualizado));
+            }
+
+            System.out.println("[CONTROLE][UPDATE] Atualização enviada → UID=" + uid + " TS=" + ts);
+            return true;
+
+        } catch (Exception e) {
+            System.err.println("[CONTROLE][UPDATE] Erro ao atualizar arquivo UID=" + uid + ": " + e.getMessage());
+            return false;
+        } finally {
+            liberarLockDistribuido(chaveLock);
         }
     }
 
@@ -157,7 +202,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             }
         }
     }
-
 
     @Override
     public boolean excluirArquivo(String uid) {
@@ -254,7 +298,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-
     // Receiver do canal controle
     private class ReceiverControle extends ReceiverAdapter {
         @Override
@@ -265,6 +308,33 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 Object o = msg.getObject();
                 if (o instanceof String) {
                     String texto = (String) o;
+
+                    // ---- Protocolo de lock distribuído ----
+                    if (texto.startsWith("LOCK_REQ:")) {
+                        // Somente o coordenador processa pedidos de lock
+                        if (ehCoordenadorControle()) {
+                            String chave = texto.substring("LOCK_REQ:".length());
+                            processarLockReq(chave, msg.getSrc());
+                        }
+                        return;
+                    }
+
+                    if (texto.startsWith("LOCK_REL:")) {
+                        // Somente o coordenador processa liberações
+                        if (ehCoordenadorControle()) {
+                            String chave = texto.substring("LOCK_REL:".length());
+                            processarLockRelease(chave, msg.getSrc());
+                        }
+                        return;
+                    }
+
+                    if (texto.startsWith("LOCK_GRANTED:")) {
+                        String chave = texto.substring("LOCK_GRANTED:".length());
+                        sinalizarLockConcedido(chave);
+                        return;
+                    }
+
+                    // ---- Replicação de cadastro de usuários ----
                     if (texto.startsWith("CADASTRO:")) {
                         String[] p = texto.split(":");
                         if (p.length >= 3) {
@@ -321,6 +391,181 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     public String obterHashEstado() {
         try { return listaUsuarios.gerarHashEstado(); } catch (Exception e) { return "ERRO_HASH"; }
     }
+
+    // ------------------------------------------------------------
+    //   Métodos auxiliares para LOCK DISTRIBUÍDO
+    // ------------------------------------------------------------
+
+    private boolean ehCoordenadorControle() {
+        try {
+            View v = canal.getView();
+            return v != null && canal.getAddress().equals(v.getMembers().get(0));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private Address getCoordenadorControle() {
+        try {
+            View v = canal.getView();
+            if (v == null || v.getMembers().isEmpty()) return null;
+            return v.getMembers().get(0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Tenta adquirir um lock distribuído para a chave fornecida.
+     * Bloqueia até timeoutMs aguardando LOCK_GRANTED.
+     */
+    private boolean adquirirLockDistribuido(String chaveLock, long timeoutMs) {
+        Address coord = getCoordenadorControle();
+        if (coord == null) {
+            System.err.println("[CONTROLE][LOCK] Nenhum coordenador disponível para lock em " + chaveLock);
+            return false;
+        }
+
+        Object monitor;
+        synchronized (monitoresLock) {
+            monitor = monitoresLock.get(chaveLock);
+            if (monitor == null) {
+                monitor = new Object();
+                monitoresLock.put(chaveLock, monitor);
+            }
+            lockConcedido.put(chaveLock, Boolean.FALSE);
+        }
+
+        try {
+            canal.send(new Message(coord, "LOCK_REQ:" + chaveLock));
+        } catch (Exception e) {
+            System.err.println("[CONTROLE][LOCK] Erro ao enviar LOCK_REQ: " + e.getMessage());
+            return false;
+        }
+
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        boolean ok;
+
+        synchronized (monitor) {
+            while (true) {
+                Boolean concedido;
+                synchronized (monitoresLock) {
+                    concedido = lockConcedido.get(chaveLock);
+                }
+                if (Boolean.TRUE.equals(concedido)) {
+                    ok = true;
+                    break;
+                }
+                long restante = deadline - System.currentTimeMillis();
+                if (restante <= 0) {
+                    ok = false;
+                    break;
+                }
+                try {
+                    monitor.wait(restante);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    ok = false;
+                    break;
+                }
+            }
+        }
+
+        if (!ok) {
+            System.err.println("[CONTROLE][LOCK] Timeout ao aguardar lock para " + chaveLock);
+            synchronized (monitoresLock) {
+                lockConcedido.remove(chaveLock);
+            }
+        }
+
+        return ok;
+    }
+
+    private void liberarLockDistribuido(String chaveLock) {
+        Address coord = getCoordenadorControle();
+        if (coord == null) return;
+        try {
+            canal.send(new Message(coord, "LOCK_REL:" + chaveLock));
+        } catch (Exception e) {
+            System.err.println("[CONTROLE][LOCK] Erro ao enviar LOCK_REL: " + e.getMessage());
+        } finally {
+            synchronized (monitoresLock) {
+                lockConcedido.remove(chaveLock);
+            }
+        }
+    }
+
+    /**
+     * Chamado quando recebemos "LOCK_GRANTED:<chave>" do coordenador.
+     */
+    private void sinalizarLockConcedido(String chaveLock) {
+        Object monitor;
+        synchronized (monitoresLock) {
+            lockConcedido.put(chaveLock, Boolean.TRUE);
+            monitor = monitoresLock.get(chaveLock);
+        }
+        if (monitor != null) {
+            synchronized (monitor) {
+                monitor.notifyAll();
+            }
+        }
+        System.out.println("[CONTROLE][LOCK] Lock concedido para " + chaveLock);
+    }
+
+    /**
+     * Processa pedido de lock (executado apenas no coordenador).
+     */
+    private void processarLockReq(String chaveLock, Address solicitante) {
+        synchronized (lockOwners) {
+            Address atual = lockOwners.get(chaveLock);
+            if (atual == null) {
+                // ninguém possui, conceder ao solicitante
+                lockOwners.put(chaveLock, solicitante);
+                try {
+                    canal.send(new Message(solicitante, "LOCK_GRANTED:" + chaveLock));
+                } catch (Exception e) {
+                    System.err.println("[CONTROLE][LOCK] Erro ao enviar LOCK_GRANTED: " + e.getMessage());
+                }
+            } else {
+                // já tem dono, enfileirar
+                Queue<Address> fila = lockFilas.get(chaveLock);
+                if (fila == null) {
+                    fila = new LinkedList<>();
+                    lockFilas.put(chaveLock, fila);
+                }
+                fila.add(solicitante);
+                System.out.println("[CONTROLE][LOCK] Lock ocupado para " + chaveLock + ", solicitante enfileirado: " + solicitante);
+            }
+        }
+    }
+
+    /**
+     * Processa liberação de lock (executado apenas no coordenador).
+     */
+    private void processarLockRelease(String chaveLock, Address solicitante) {
+        synchronized (lockOwners) {
+            Address atual = lockOwners.get(chaveLock);
+            if (atual == null || !atual.equals(solicitante)) {
+                // ou já foi liberado, ou não somos o dono atual
+                return;
+            }
+            Queue<Address> fila = lockFilas.get(chaveLock);
+            if (fila != null && !fila.isEmpty()) {
+                Address prox = fila.poll();
+                lockOwners.put(chaveLock, prox);
+                try {
+                    canal.send(new Message(prox, "LOCK_GRANTED:" + chaveLock));
+                } catch (Exception e) {
+                    System.err.println("[CONTROLE][LOCK] Erro ao enviar LOCK_GRANTED (fila): " + e.getMessage());
+                }
+            } else {
+                lockOwners.remove(chaveLock);
+            }
+        }
+        System.out.println("[CONTROLE][LOCK] Lock liberado para " + chaveLock + " por " + solicitante);
+    }
+
+    // ------------------------------------------------------------
 
     public static void main(String[] args) {
         ServidorControle s = null;

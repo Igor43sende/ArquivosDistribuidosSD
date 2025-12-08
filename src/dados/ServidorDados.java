@@ -35,6 +35,13 @@ public class ServidorDados extends ReceiverAdapter {
 
     /** Salva arquivo LOCALMENTE, sem replicação de metadados */
     private void salvarArquivoLocal(Arquivo arquivo) throws Exception {
+
+        // *** NOVO ***
+        // Garante timestamp interno caso o Arquivo não possua esta informação
+        if (arquivo.getTimestamp() == 0) {
+            arquivo.setTimestamp(System.currentTimeMillis());
+        }
+
         listaArquivos.adicionarArquivo(arquivo);
 
         if (arquivo.getConteudo() != null && arquivo.getConteudo().length > 0) {
@@ -48,11 +55,15 @@ public class ServidorDados extends ReceiverAdapter {
 
     /** Chamado apenas pelo nó que recebe o upload real: salva e replica metadado */
     public void salvarArquivoComReplicacao(Arquivo arquivo) throws Exception {
-        // salva localmente
+
         salvarArquivoLocal(arquivo);
 
         // replicar metadados para o cluster (multicast) — cópia sem conteúdo
         Arquivo meta = new Arquivo(arquivo.getUid(), arquivo.getNome(), null, arquivo.getUsuario());
+
+        // *** NOVO ***
+        meta.setTimestamp(arquivo.getTimestamp());  // mantém versão
+
         try {
             canal.send(new Message(null, meta));
         } catch (Exception e) {
@@ -65,7 +76,6 @@ public class ServidorDados extends ReceiverAdapter {
 
     @Override
     public void receive(Message msg) {
-        // Evitar eco (não processar mensagens originadas por este mesmo nó)
         if (msg.getSrc() != null && msg.getSrc().equals(canal.getAddress())) return;
 
         Object obj;
@@ -85,13 +95,24 @@ public class ServidorDados extends ReceiverAdapter {
         }
 
         if (obj instanceof Arquivo arquivo) {
+
+            // *** NOVO: SUPORTE A UPDATE ***
+            if (arquivo.isUpdate()) {
+                try {
+                    atualizarArquivo(arquivo);
+                } catch (Exception e) {
+                    System.err.println("[DADOS] Erro ao atualizar arquivo: " + e.getMessage());
+                }
+                return;
+            }
+
             try {
+                // upload normal
                 if (arquivo.getConteudo() != null && arquivo.getConteudo().length > 0) {
-                    // 🔹 Upload real vindo do controle → salva e replica metadado
                     salvarArquivoComReplicacao(arquivo);
                     System.out.println("[DADOS] Arquivo recebido (com conteúdo) e salvo. UID=" + arquivo.getUid());
                 } else {
-                    // 🔹 Metadado replicado → só atualiza lista, NÃO replica de novo!
+                    // metadado replicado
                     salvarArquivoLocal(arquivo);
                     System.out.println("[DADOS] Metadado recebido e aplicado. UID=" + arquivo.getUid());
                 }
@@ -105,6 +126,68 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] Mensagem inesperada: " + (obj != null ? obj.getClass().getName() : "NULL"));
     }
 
+    // *** NOVO ***
+    // Atualização real de arquivo (overwrite)
+    private void atualizarArquivo(Arquivo arquivo) throws Exception {
+
+        // Garante timestamp, se não vier do controle
+        if (arquivo.getTimestamp() == 0) {
+            arquivo.setTimestamp(System.currentTimeMillis());
+        }
+
+        Arquivo anterior = listaArquivos.buscarPorUid(arquivo.getUid());
+
+        if (anterior == null) {
+            // Se não existir metadado, trata como upload normal
+            System.out.println("[DADOS] UPDATE recebido para UID inexistente, tratando como novo upload. UID=" + arquivo.getUid());
+            salvarArquivoComReplicacao(arquivo);
+            return;
+        }
+
+        // apenas atualiza se for mais recente
+        if (anterior.getTimestamp() > arquivo.getTimestamp()) {
+            System.out.println("[DADOS] Ignorando UPDATE atrasado para UID=" + arquivo.getUid());
+            return;
+        }
+
+        // grava novo conteúdo em disco
+        if (arquivo.getConteudo() != null) {
+            try (FileOutputStream fos = new FileOutputStream(DIRETORIO_BASE + arquivo.getUid())) {
+                fos.write(arquivo.getConteudo());
+            }
+        }
+
+        // cria um NOVO objeto Arquivo com:
+        //  - mesmo UID
+        //  - mesmo nome
+        //  - mesmo dono (usuario)
+        //  - novo conteúdo
+        Arquivo atualizado = new Arquivo(
+                anterior.getUid(),
+                anterior.getNome(),
+                arquivo.getConteudo(),
+                anterior.getUsuario()
+        );
+        atualizado.setTimestamp(arquivo.getTimestamp());
+
+        // atualiza metadados na lista em memória
+        listaArquivos.atualizarArquivo(atualizado);
+        salvarEstado();
+
+        // replica metadados atualizados (sem conteúdo) para o cluster
+        Arquivo meta = new Arquivo(
+                atualizado.getUid(),
+                atualizado.getNome(),
+                null,
+                atualizado.getUsuario()
+        );
+        meta.setTimestamp(atualizado.getTimestamp());
+        canal.send(new Message(null, meta));
+
+        System.out.println("[DADOS] UPDATE aplicado e replicado. UID=" + atualizado.getUid());
+    }
+
+
     private void tratarComando(String comando, Address remetente) {
         if (comando == null || comando.trim().isEmpty()) return;
         String[] partes = comando.split(";", 2);
@@ -113,6 +196,12 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] Comando recebido de " + remetente + " -> " + comando);
 
         switch (acao) {
+
+            case "UPDATE": {
+                // *** FUTURO: suporte opcional a comando textual de UPDATE ***
+                break;
+            }
+
             case "LIST_USER": {
                 String usuario = partes.length > 1 ? partes[1] : "";
                 List<String> resultado = new ArrayList<>();
@@ -159,15 +248,20 @@ public class ServidorDados extends ReceiverAdapter {
 
                 try {
                     if (encontrado && conteudo != null) {
-                        // Enviar um Arquivo SERIALIZADO com o conteúdo dentro
+
                         Arquivo resposta = new Arquivo(
                                 uid,
                                 a != null ? a.getNome() : "desconhecido",
                                 conteudo,
                                 a != null ? a.getUsuario() : null
                         );
+
+                        // *** NOVO ***
+                        resposta.setTimestamp(a.getTimestamp());
+
                         Message m = new Message(remetente, resposta);
                         canal.send(m);
+
                         System.out.println("[DADOS] Enviado Arquivo UID=" + uid +
                                 " para " + remetente + " bytes=" + conteudo.length);
                     } else {
@@ -196,6 +290,7 @@ public class ServidorDados extends ReceiverAdapter {
                 }
                 break;
             }
+
             case "SEARCH": {
                 String nome = partes.length > 1 ? partes[1] : "";
                 List<String> res = new ArrayList<>();
@@ -213,6 +308,7 @@ public class ServidorDados extends ReceiverAdapter {
                 }
                 break;
             }
+
             default:
                 System.out.println("[DADOS] Comando desconhecido: " + comando);
         }
