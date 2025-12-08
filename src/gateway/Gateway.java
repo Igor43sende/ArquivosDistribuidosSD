@@ -10,25 +10,41 @@ import java.util.List;
 /**
  * Gateway
  *
- * Atua como front-end via RMI, recebendo requisições do cliente
- * e encaminhando ao ServidorControle (back-end distribuído).
+ * Atua como a **ponte entre o Cliente (RMI)** e o **ServidorControle (cluster JGroups)**.
  *
- * Não executa regras de negócio — apenas repassa as chamadas.
+ * Seu papel é extremamente importante:
+ *  - expõe os métodos via RMI
+ *  - recebe chamadas do Cliente
+ *  - repassa diretamente para o ServidorControle
+ *
+ * O Gateway **NÃO IMPLEMENTA regra de negócio**.
+ * Ele apenas "traduz" chamadas remotas em chamadas locais.
+ *
+ * Assim o Cliente não precisa conhecer JGroups — apenas RMI.
  */
 public class Gateway extends UnicastRemoteObject implements IGateway {
 
+    // Referência para o ServidorControle REAL
+    // Tudo que chega do Cliente via RMI é repassado para ele.
     private final IControle servidorControle;
 
     /**
      * Construtor padrão.
      *
-     * @param controle instância do servidor de controle (implementa IControle)
+     * Ao chamar super(), o Java exporta automaticamente este objeto
+     * e o torna acessível via RMI.
+     *
+     * @param controle instância concreta do ServidorControle
      */
     public Gateway(IControle controle) throws RemoteException {
         super(); // exporta o objeto automaticamente via RMI
         this.servidorControle = controle;
         System.out.println("[Gateway] Instanciado e vinculado ao servidor de controle.");
     }
+
+    // ---------------------------------
+    // BLOCO DE CADASTRO E AUTENTICAÇÃO
+    // ---------------------------------
 
     @Override
     public boolean cadastrarUsuario(String nomeUsuario, String senha) throws RemoteException {
@@ -52,6 +68,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // -------
+    // UPLOAD
+    // -------
+
     @Override
     public String enviarArquivos(String nomeArquivo, byte[] conteudo, String nomeUsuario) throws RemoteException {
         try {
@@ -62,7 +82,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
-    // ★ NOVO ★ — atualização de arquivo via RMI
+    // -------------------------------------------
+    // UPDATE (operação mais complexa do sistema)
+    // -------------------------------------------
+
     @Override
     public boolean atualizarArquivo(String uid, byte[] novoConteudo) throws RemoteException {
         System.out.println("[Gateway] Requisição UPDATE para UID=" + uid);
@@ -74,6 +97,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // ----------
+    // LISTAGEM
+    // ----------
+
     @Override
     public List<String> solicitarListagem(String nomeUsuario) throws RemoteException {
         try {
@@ -83,6 +110,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
             throw new RemoteException("Erro na listagem", e);
         }
     }
+
+    // ---------
+    // DOWNLOAD
+    // ---------
 
     @Override
     public byte[] downloadArquivo(String uid) throws RemoteException {
@@ -95,6 +126,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
+    // ---------
+    // EXCLUSÃO
+    // ---------
+
     @Override
     public boolean excluirArquivo(String uid) throws RemoteException {
         System.out.println("[Gateway] Requisição de exclusão do arquivo UID: " + uid);
@@ -105,6 +140,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
             throw new RemoteException("Falha ao excluir arquivo", e);
         }
     }
+
+    // -------------
+    // BUSCA GLOBAL
+    // -------------
 
     @Override
     public List<String> buscarArquivos(String nome) throws RemoteException {
@@ -117,7 +156,10 @@ public class Gateway extends UnicastRemoteObject implements IGateway {
         }
     }
 
-    // ★★ HASH GLOBAL ★★ NO GATEWAY
+    // ---------------------------------------------
+    // HASH GLOBAL DO SISTEMA (Usuários + Arquivos)
+    // ---------------------------------------------
+
     @Override
     public String obterHashGlobal() throws RemoteException {
         System.out.println("[Gateway] Requisição: obterHashGlobal()");

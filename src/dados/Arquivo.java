@@ -2,26 +2,41 @@ package dados;
 
 import java.io.Serializable;
 
+// Classe que representa um arquivo dentro do cluster de DADOS.
+// Ela é serializável porque precisa trafegar entre servidores via JGroups
+// e também pode ser gravada em disco.
+//
+// Contém:
+//  - UID único do arquivo
+//  - Nome original enviado pelo usuário
+//  - Conteúdo em bytes
+//  - Nome do usuário responsável
+//
+// *** Novos campos ***
+//  - update: indica se esta operação é uma atualização de um arquivo existente
+//  - timestamp: versão temporal usada para ordenação e resolução de conflitos
 public class Arquivo implements Serializable {
     private static final long serialVersionUID = 1L;
 
-    private String uid;
-    private String nome;
-    private byte[] conteudo;
-    private String nomeUsuario;
+    private String uid;          // Identificador único do arquivo
+    private String nome;         // Nome que será exibido ao usuário
+    private byte[] conteudo;     // Conteúdo real do arquivo (download)
+    private String nomeUsuario;  // Quem fez upload/alteração
 
-    // *** NOVO ***
-    private boolean update = false;       // indica operação de UPDATE
-    private long timestamp = 0;           // versão do arquivo
+    // Marcadores adicionais usados pelo mecanismo de UPDATE distribuído:
+    private boolean update = false;   // true se esta mensagem representa atualização
+    private long timestamp = 0;       // versão do arquivo, definida no ServidorDados
 
+    // Construtor principal: recebe metadados e conteúdo do arquivo.
+    // O timestamp será atribuído mais tarde pelo ServidorDados.
     public Arquivo(String uid, String nome, byte[] conteudo, String nomeUsuario) {
         this.uid = uid;
         this.nome = nome;
         this.conteudo = conteudo;
         this.nomeUsuario = nomeUsuario;
-        // timestamp será atribuído no ServidorDados se ainda for zero
     }
 
+    // ---------- Getters ----------
     public String getUid() {
         return uid;
     }
@@ -38,7 +53,10 @@ public class Arquivo implements Serializable {
         return nomeUsuario;
     }
 
-    // *** NOVO *** — marca arquivo como UPDATE
+    // *** UPDATE DISTRIBUÍDO ***
+    // Esse campo indica que o arquivo é uma atualização.
+    // Ele permite que o ServidorDados trate esse objeto de forma especial:
+    // substituindo conteúdo, preservando nome e controlando versões.
     public void setUpdate(boolean update) {
         this.update = update;
     }
@@ -47,7 +65,9 @@ public class Arquivo implements Serializable {
         return update;
     }
 
-    // *** NOVO *** — timestamp do arquivo
+    // *** CONTROLE DE VERSÃO DO ARQUIVO ***
+    // O timestamp é usado para decidir qual atualização é mais recente
+    // quando múltiplos nós enviam updates concorrentes.
     public void setTimestamp(long ts) {
         this.timestamp = ts;
     }
@@ -56,6 +76,8 @@ public class Arquivo implements Serializable {
         return timestamp;
     }
 
+    // Representação textual do arquivo.
+    // Essencial para logs, debug, cálculo de hash e mensagens internas.
     @Override
     public String toString() {
         return "Arquivo[uid=" + uid +

@@ -19,39 +19,70 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.security.MessageDigest;   // ★★ HASH GLOBAL ★★
-import java.nio.charset.StandardCharsets; // ★★ HASH GLOBAL ★★
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+
+// Classe principal do cluster de CONTROLE.
+// Ela coordena:
+//  - autenticação e cadastro de usuários
+//  - comunicação com cluster de dados (upload, download, listagem…)
+//  - replicação de estado (ListaUsuarios) entre nós JGroups
+//  - controle de versão do estado via STATE_VERSION_REQ/RESP
+//  - implementação de um LOCK DISTRIBUÍDO atuando como coordenador do cluster Controle
+//  - obtenção do HASH GLOBAL do sistema (usuários + arquivos)
 
 public class ServidorControle extends ReceiverAdapter implements IControle {
 
-    private JChannel canal;          // cluster de controle
-    private JChannel canalDados;     // cluster de dados
+    // Dois canais JGroups:
+    //  canal  → cluster de CONTROLE (sincroniza usuários, locks, versão, etc.)
+    //  canalDados → cluster de DADOS (onde ficam os arquivos)
+    private JChannel canal;
+    private JChannel canalDados;
 
+    // Estrutura que guarda todos os usuários cadastrados no sistema
     private ListaUsuarios listaUsuarios;
 
+    // Estas variáveis guardam temporariamente respostas vindas do cluster de dados:
+    //  - listagem de arquivos
+    //  - download (byte[] ou objeto Arquivo)
+    //  - hash dos metadados (para o hash global)
+    //
+    // Elas são usadas porque a comunicação é assíncrona, então
+    // o ServidorControle precisa esperar pela resposta usando wait()/notify().
     private List<String> ultimaRespostaListagem = new ArrayList<>();
-
-    // Pode receber byte[] (conteúdo), String (erros), ou resposta HASH
     private Object ultimaRespostaDownload = null;
-
-    // ★★ HASH GLOBAL ★★
     private String ultimaRespostaHashArquivos = null;
 
+    // Usado para sincronizar as esperas por respostas vindas do cluster de dados.
     private final Object responseLock = new Object();
+
+    // Persistência local do estado do cluster de controle (ListaUsuarios),
+    // garantindo durabilidade mesmo se a máquina for desligada.
     private static final String CAMINHO_ESTADO_CONTROLE = "estado_controle.bin";
 
-    // ---- Lock distribuído (coordenador do cluster Controle) ----
+    // ----- BLOCO DO LOCK DISTRIBUÍDO -----
+    // O cluster de CONTROLE implementa um mecanismo próprio de locks:
+    //
+    //  - Apenas o coordenador decide quem recebe o lock.
+    //  - Solicitações LOCK_REQ são enviadas ao coordenador.
+    //  - Há uma fila para cada chave de lock.
+    //  - O coordenador responde com LOCK_GRANTED.
+    //
+    //  Isso garante exclusão mútua entre uploads/updates/deletes.
     private final Map<String, Address> lockOwners = new HashMap<>();
     private final Map<String, Queue<Address>> lockFilas = new HashMap<>();
-
-    // Estruturas locais para aguardar LOCK_GRANTED
     private final Map<String, Object> monitoresLock = new HashMap<>();
     private final Map<String, Boolean> lockConcedido = new HashMap<>();
 
-    // ---- NOVO: controle de versão do estado de CONTROLE ----
-    private long stateVersion = 0;        // versão local do estado
-    private long versaoCoordenador = 0;   // versão reportada pelo coordenador
-    private final Object stateLock = new Object(); // para sincronizar recebimento de STATE_VERSION_RESP
+
+    // ----- CONTROLE DE VERSÃO DO ESTADO -----
+    // Cada alteração em ListaUsuarios incrementa stateVersion.
+    // Nós não-coordenadores perguntam ao coordenador qual é sua versão.
+    // Se estiverem defasados, fazem getState() automaticamente.
+    private long stateVersion = 0;
+    private long versaoCoordenador = 0;
+    private final Object stateLock = new Object();
+
 
 
     public ServidorControle() {
@@ -64,19 +95,24 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     }
 
     public void iniciar() throws Exception {
+
+        // Carrega estado local salvo em disco
         carregarEstado();
         System.out.println("[CONTROLE] Iniciando ServidorControle...");
 
+        // Conecta ao cluster de CONTROLE
         canal = new JChannel("controle.xml");
         canal.setReceiver(new ReceiverControle());
         canal.connect("ClusterControle");
         System.out.println("[CONTROLE] Canal CONTROLE conectado: " + canal.getAddress());
 
+        // Conecta ao cluster de DADOS
         canalDados = new JChannel("dados.xml");
         canalDados.setReceiver(new ReceiverDados());
         canalDados.connect("ClusterDados");
         System.out.println("[CONTROLE] Canal DADOS conectado: " + canalDados.getAddress());
 
+        // Se não sou coordenador, peço getState() para sincronizar ListaUsuarios
         if (!canal.getAddress().equals(canal.getView().getMembers().get(0))) {
             System.out.println("[CONTROLE] Solicitando estado do coordenador...");
             canal.getState(null, 10000);
@@ -93,6 +129,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         return ok;
     }
 
+    // Cadastro de usuários com replicação:
+    //  1) Salva no estado local
+    //  2) Repassa mensagem CADASTRO:... ao cluster de controle
+    //  3) Outros nós aplicam a mudança e também salvam em disco
     @Override
     public boolean cadastrarUsuario(String nomeUsuario, String senha) {
         try {
@@ -109,6 +149,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
+    // UPLOAD DE ARQUIVO:
+    //  - Para evitar conflitos, adquire lock distribuído baseado no nome do arquivo.
+    //  - Gera UID, empacota Arquivo e envia ao coordenador do cluster de dados.
+    //  - Aguarda e libera lock ao final.
     @Override
     public String enviarArquivos(String nomeArquivo, byte[] conteudo, String usuario) {
         String chaveLock = "file:name:" + nomeArquivo;
@@ -131,10 +175,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
 
             System.out.println("[CONTROLE] Upload enviado. UID=" + uid);
 
-            // Opcional: se você considerar que mudanças de arquivos também contam
-            // como parte do "estado global", pode incrementar a versão aqui
-            // incrementarVersao();
-
             return uid;
 
         } catch (Exception e) {
@@ -144,6 +184,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
+    // UPDATE DISTRIBUÍDO:
+    // Mesmo protocolo do upload, mas:
+    //  - O nome não é alterado
+    //  - O campo update=true informa ao cluster de dados que é atualização
     @Override
     public boolean atualizarArquivo(String uid, byte[] novoConteudo) {
         String chaveLock = "file:uid:" + uid;
@@ -169,9 +213,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             }
 
             System.out.println("[CONTROLE][UPDATE] Atualização enviada → UID=" + uid + " TS=" + ts);
-
-            // Opcional: idem ao comentário do upload
-            // incrementarVersao();
 
             return true;
 
@@ -259,7 +300,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-
+    // LISTAGEM E BUSCA:
+    // Funcionam de maneira semelhante:
+    //  - Mandam comando textual ao cluster de dados
+    //  - Esperam uma List<String> no ReceiverDados
     @Override
     public List<String> solicitarListagem(String usuario) {
         synchronized (responseLock) {
@@ -306,9 +350,15 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-    // ------------------------------------------------------------
-    //   Receiver do canal de dados
-    // ------------------------------------------------------------
+    // RECEIVER DO CLUSTER DE DADOS:
+    // Interpreta todas as respostas vindas dos ServidoresDados:
+    //
+    //  - List<String> → resultado de SEARCH/LIST_USER
+    //  - String → "NOT_FOUND" ou HASH de arquivos
+    //  - Arquivo → resposta de download
+    //
+    // É aqui que as respostas são armazenadas nas variáveis temporárias
+    // e liberam as threads que estavam aguardando notify().
     private class ReceiverDados extends ReceiverAdapter {
         @SuppressWarnings("unchecked")
         @Override
@@ -376,9 +426,14 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-    // ------------------------------------------------------------
-    //   Receiver do canal de CONTROLE
-    // ------------------------------------------------------------
+    // RECEIVER DO CLUSTER DE CONTROLE:
+    // Aqui são tratadas mensagens importantes:
+    //
+    //  - STATE_VERSION_REQ / RESP → protocolo de sincronização incremental
+    //  - LOCK_REQ / REL / GRANTED → implementação do lock distribuído
+    //  - CADASTRO:... → replicação de novos usuários
+    //
+    // Também trata eventos de viewAccepted para detectar troca de coordenador.
     private class ReceiverControle extends ReceiverAdapter {
         @Override
         public void receive(Message msg) {
@@ -389,7 +444,7 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 if (o instanceof String) {
                     String texto = (String) o;
 
-                    // ---- NOVO: Protocolo de versão de estado ----
+                    // ---- Protocolo de versão de estado ----
                     if (texto.equals("STATE_VERSION_REQ")) {
                         if (ehCoordenadorControle()) {
                             try {
@@ -445,7 +500,7 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                         if (p.length >= 3) {
                             listaUsuarios.cadastrarUsuario(p[1], p[2]);
                             salvarEstado();
-                            incrementarVersao(); // NOVO: replica também conta como mudança de estado
+                            incrementarVersao(); // Replica também conta como mudança de estado
                             System.out.println("[CONTROLE][CTRL] Cadastro replicado: " + p[1]);
                         }
                         return;
@@ -470,6 +525,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
 
         @Override
         public void viewAccepted(View view) {
+            // Quando a composição do cluster muda:
+            //  - Se sou coordenador, apenas aviso
+            //  - Se não sou, comparo minha versão com a do coordenador
+            //    e faço getState() apenas se estiver desatualizado.
             System.out.println("[CONTROLE][CTRL] Nova view: " + view);
 
             boolean souCoordenador = ehCoordenadorControle();
@@ -509,9 +568,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-    // ------------------------------------------------------------
-    //   Estado replicado do canal de CONTROLE (listaUsuarios)
-    // ------------------------------------------------------------
+    // getState/setState:
+    // Replicam ListaUsuarios para novos nós ou nós recuperando estado.
+    // Isso garante que o cluster de controle esteja sempre consistente
+    // mesmo após falhas, quedas ou novas instâncias entrando.
     @Override
     public void getState(OutputStream out) throws Exception {
         synchronized (listaUsuarios) {
@@ -544,9 +604,14 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-    // ------------------------------------------------------------
-    //   ★★ HASH GLOBAL ★★
-    // ------------------------------------------------------------
+    // ---------- HASH GLOBAL ----------
+    // Junta:
+    //   1) Hash dos usuários (gerado pela ListaUsuarios)
+    //   2) Hash dos arquivos (pedido ao cluster de dados)
+    // e aplica SHA-256 sobre ambos.
+    //
+    // Esse valor final representa o "estado completo do sistema".
+
     @Override
     public String obterHashGlobal() {
         String hashUsuarios;
@@ -604,10 +669,18 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         }
     }
 
-    // ------------------------------------------------------------
-    //   Métodos auxiliares para LOCK DISTRIBUÍDO
-    // ------------------------------------------------------------
-
+    // ----- LOCK DISTRIBUÍDO -----
+    // Protocolo de 3 operações:
+    //
+    //  - adquirirLockDistribuido():
+    //         envia LOCK_REQ e espera LOCK_GRANTED
+    //
+    //  - liberarLockDistribuido():
+    //         informa ao coordenador que terminou
+    //
+    //  - processarLockReq() / processarLockRelease():
+    //         lógica do coordenador para fila de locks
+    //
     private boolean ehCoordenadorControle() {
         try {
             View v = canal.getView();
@@ -763,10 +836,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         System.out.println("[CONTROLE][LOCK] Lock liberado para " + chaveLock + " por " + solicitante);
     }
 
-    // ------------------------------------------------------------
-    //   main()
-    // ------------------------------------------------------------
     public static void main(String[] args) {
+
+        // Inicializa todo o servidor, conecta aos clusters e aguarda ENTER.
+        // Salva estado antes de sair.
         ServidorControle s = null;
         try {
             s = new ServidorControle();

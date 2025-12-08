@@ -25,6 +25,11 @@ import java.nio.file.Path;
  * - exclusão
  * - atualização (UPDATE)
  * - hash global do sistema
+ *
+ * Em resumo:
+ * Este é o programa que o usuário final realmente usa.
+ * Ele simplesmente lê as opções, chama o Gateway via RMI
+ * e exibe o resultado.
  */
 public class Cliente {
 
@@ -34,6 +39,7 @@ public class Cliente {
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
 
+        // Conexão com o Gateway via RMI
         try {
             gateway = (IGateway) Naming.lookup("rmi://localhost/Gateway");
             System.out.println("Cliente conectado ao Gateway via RMI.");
@@ -42,6 +48,7 @@ public class Cliente {
             return;
         }
 
+        // Loop principal do menu
         while (true) {
 
             exibirMenu();
@@ -54,6 +61,7 @@ public class Cliente {
                 continue;
             }
 
+            // Cada case chama a função específica para a ação solicitada
             switch (opcao) {
 
                 case 1:
@@ -97,7 +105,9 @@ public class Cliente {
                     System.out.println("Opção inválida.");
             }
 
-            // ★★★ EXIBIR HASH GLOBAL ★★★
+            // Após cada operação, exibimos o hash que representa:
+            // - estado dos usuários
+            // - estado dos arquivos
             try {
                 String hash = gateway.obterHashGlobal();
                 System.out.println("\n[HASH GLOBAL DO SISTEMA] " + hash);
@@ -107,9 +117,9 @@ public class Cliente {
         }
     }
 
-    /**
-     * Exibe menu principal.
-     */
+
+     // Exibe menu principal.
+
     private static void exibirMenu() {
         System.out.println("\n===== MENU =====");
         System.out.println("1 - Cadastrar Usuário");
@@ -123,6 +133,10 @@ public class Cliente {
         System.out.println("0 - Sair");
         System.out.print("Escolha: ");
     }
+
+    // ------------------------------
+    // BLOCO DE CADASTRO E LOGIN
+    // ------------------------------
 
     private static void cadastrarUsuario(Scanner scanner) {
         System.out.print("Usuário: ");
@@ -145,6 +159,7 @@ public class Cliente {
         String senha = scanner.nextLine();
 
         try {
+            // Login é sempre validado no ServidorControle via RMI
             if (gateway.autenticarUsuario(nome, senha)) {
                 usuarioLogado = nome;
                 System.out.println("Login realizado com sucesso.");
@@ -155,6 +170,10 @@ public class Cliente {
             System.err.println("Erro ao realizar login: " + e.getMessage());
         }
     }
+
+    // ------------------------------
+    // UPLOAD
+    // ------------------------------
 
     private static void enviarArquivo(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
@@ -181,6 +200,10 @@ public class Cliente {
         }
     }
 
+    // ------------------------------
+    // LISTAGEM
+    // ------------------------------
+
     private static void listarArquivos() {
         if (!usuarioLogadoOK()) return;
 
@@ -199,6 +222,10 @@ public class Cliente {
         }
     }
 
+    // ------------------------------
+    // DOWNLOAD
+    // ------------------------------
+
     private static void realizarDownload(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
 
@@ -206,6 +233,7 @@ public class Cliente {
         String uid = scanner.nextLine();
 
         try {
+            // Solicita ao ServidorControle → ServidorDados → retorna byte[]
             byte[] conteudo = gateway.downloadArquivo(uid);
 
             if (conteudo != null && conteudo.length > 0) {
@@ -221,6 +249,10 @@ public class Cliente {
             System.out.println("Erro ao tentar baixar arquivo: " + e.getMessage());
         }
     }
+
+    // ------------------------------
+    // DELETE
+    // ------------------------------
 
     private static void excluirArquivo(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
@@ -239,6 +271,10 @@ public class Cliente {
             System.err.println("Falha ao excluir arquivo: " + e.getMessage());
         }
     }
+
+    // ------------------------------
+    // BUSCA GLOBAL
+    // ------------------------------
 
     private static void buscarArquivos(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
@@ -261,7 +297,18 @@ public class Cliente {
         }
     }
 
-    // ★★★ UPDATE de arquivo ★★★
+    // ------------------------------
+    // UPDATE
+    // ------------------------------
+
+    /**
+     * UPDATE é a operação mais complexa porque:
+     *  - o Cliente envia novo conteúdo
+     *  - o Gateway envia para ServidorControle
+     *  - ServidorControle faz lock distribuído
+     *  - envia Arquivo.update=true para ServidorDados
+     *  - nós de dados sincronizam timestamps
+     */
     private static void atualizarArquivo(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
 
@@ -291,6 +338,10 @@ public class Cliente {
             System.err.println("Erro ao atualizar arquivo: " + e.getMessage());
         }
     }
+
+    // ------------------------------
+    // AUXILIAR
+    // ------------------------------
 
     private static boolean usuarioLogadoOK() {
         if (usuarioLogado == null) {
