@@ -23,5 +23,6 @@ public interface IGateway extends Remote {
 
     List<String> buscarArquivos(String nome) throws RemoteException;
 
-    String obterHashEstado() throws RemoteException;
+    // ★★ NOVO — HASH GLOBAL DO SISTEMA ★★
+    String obterHashGlobal() throws RemoteException;
 }

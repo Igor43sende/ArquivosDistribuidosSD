@@ -13,9 +13,18 @@ import java.nio.file.Path;
  * Cliente
  *
  * Este cliente consome o serviço RMI exposto pelo Gateway, que por sua vez
- * encaminha operações ao ServidorControle. Ele implementa todas as funcionalidades
- * exigidas no PDF: cadastro, login, upload real de arquivos, download, listagem,
- * busca global, exclusão e exibição do hash global do sistema.
+ * encaminha operações ao ServidorControle (back-end distribuído).
+ *
+ * Implementa todas as funcionalidades do PDF:
+ * - cadastro
+ * - login
+ * - upload
+ * - listagem
+ * - download
+ * - busca
+ * - exclusão
+ * - atualização (UPDATE)
+ * - hash global do sistema
  */
 public class Cliente {
 
@@ -75,7 +84,7 @@ public class Cliente {
                     buscarArquivos(scanner);
                     break;
 
-                case 8: // ★★★ NOVO ★★★
+                case 8:
                     atualizarArquivo(scanner);
                     break;
 
@@ -88,13 +97,13 @@ public class Cliente {
                     System.out.println("Opção inválida.");
             }
 
+            // ★★★ EXIBIR HASH GLOBAL ★★★
             try {
-                String hash = gateway.obterHashEstado();
+                String hash = gateway.obterHashGlobal();
                 System.out.println("\n[HASH GLOBAL DO SISTEMA] " + hash);
             } catch (Exception e) {
                 System.out.println("\n[HASH] Não foi possível obter hash global: " + e.getMessage());
             }
-
         }
     }
 
@@ -110,7 +119,7 @@ public class Cliente {
         System.out.println("5 - Download de Arquivo");
         System.out.println("6 - Excluir Arquivo");
         System.out.println("7 - Buscar Arquivos (Global)");
-        System.out.println("8 - Atualizar Arquivo (UPDATE)"); // ★ NOVO ★
+        System.out.println("8 - Atualizar Arquivo (UPDATE)");
         System.out.println("0 - Sair");
         System.out.print("Escolha: ");
     }
@@ -222,11 +231,9 @@ public class Cliente {
         try {
             boolean sucesso = gateway.excluirArquivo(uidExcluir);
 
-            if (sucesso) {
-                System.out.println("Arquivo excluído com sucesso.");
-            } else {
-                System.out.println("Falha ao excluir arquivo.");
-            }
+            System.out.println(
+                    sucesso ? "Arquivo excluído com sucesso." : "Falha ao excluir arquivo."
+            );
 
         } catch (Exception e) {
             System.err.println("Falha ao excluir arquivo: " + e.getMessage());
@@ -254,7 +261,7 @@ public class Cliente {
         }
     }
 
-    // ★★★★★ NOVO MÉTODO: UPDATE DE ARQUIVO ★★★★★
+    // ★★★ UPDATE de arquivo ★★★
     private static void atualizarArquivo(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
 
@@ -276,11 +283,9 @@ public class Cliente {
 
             boolean sucesso = gateway.atualizarArquivo(uid, novoConteudo);
 
-            if (sucesso) {
-                System.out.println("Arquivo atualizado com sucesso!");
-            } else {
-                System.out.println("Falha ao atualizar arquivo.");
-            }
+            System.out.println(
+                    sucesso ? "Arquivo atualizado com sucesso!" : "Falha ao atualizar arquivo."
+            );
 
         } catch (Exception e) {
             System.err.println("Erro ao atualizar arquivo: " + e.getMessage());

@@ -22,9 +22,7 @@ public class ListaArquivos implements Serializable {
         System.out.println("[ListaArquivos] Arquivo adicionado/atualizado: " + arquivo);
     }
 
-    /** *** NOVO ***
-     * Atualiza arquivo existente apenas se a versão recebida for mais recente.
-     */
+    /** Atualiza arquivo existente apenas se a versão recebida for mais recente. */
     public synchronized void atualizarArquivo(Arquivo novo) {
         Arquivo antigo = buscarPorUid(novo.getUid());
 
@@ -53,7 +51,7 @@ public class ListaArquivos implements Serializable {
         return null;
     }
 
-    /** Busca arquivo pelo nome (primeira ocorrência encontrada) */
+    /** Busca arquivo pelo nome */
     public synchronized Arquivo buscarPorNome(String nome) {
         for (Arquivo a : arquivos) {
             if (a.getNome().equalsIgnoreCase(nome)) return a;
@@ -82,29 +80,47 @@ public class ListaArquivos implements Serializable {
     // *** NOVO *** Funções exigidas pelo PDF
     // ----------------------------------------------------------------------
 
-    /** *** NOVO ***
-     * Retorna todos os arquivos cujo timestamp seja maior que o informado.
-     * Usado para sincronização incremental em novos nós do cluster.
-     */
+    /** Retorna arquivos cujo timestamp seja maior que o informado */
     public synchronized List<Arquivo> arquivosMaisRecentesQue(long timestamp) {
         return arquivos.stream()
                 .filter(a -> a.getTimestamp() > timestamp)
                 .collect(Collectors.toList());
     }
 
-    /** *** NOVO ***
-     * Gera hash global de metadados (UID, nome, usuario, timestamp).
-     * O cliente pode usar isso para verificar consistência do cluster.
+    /**
+     * Hash global do estado inteiro da ListaArquivos (metadados)
+     * Usado pelo ServidorControle ou auditoria interna
      */
     public synchronized String gerarHashEstado() {
+        return gerarHash(true);
+    }
+
+    /**
+     * ★★★ NOVO ★★★
+     * Hash apenas dos METADADOS — este é o método chamado pelo ServidorDados
+     *
+     * O PDF exige que:
+     * - o ServidorControle peça "HASH"
+     * - o ServidorDados gere o hash dos metadados de arquivos
+     */
+    public synchronized String gerarHashMetadados() {
+        return gerarHash(true);
+    }
+
+    /**
+     * Função interna auxiliar de criação de hash (ordenado → determinístico).
+     */
+    private synchronized String gerarHash(boolean apenasMetadados) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
 
-            // Ordena para que todos os nós gerem o mesmo hash
+            // Ordena por UID para gerar hashes consistentes entre nós
             List<Arquivo> ordenados = new ArrayList<>(arquivos);
             ordenados.sort(Comparator.comparing(Arquivo::getUid));
 
             for (Arquivo a : ordenados) {
+
+                // Conteúdo NUNCA entra no hash → só metadados
                 String linha = a.getUid() + "|" +
                         a.getNome() + "|" +
                         a.getUsuario() + "|" +
