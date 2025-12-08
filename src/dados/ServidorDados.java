@@ -8,6 +8,14 @@ import java.util.List;
 import java.util.ArrayList;
 import util.PersistenciaUtil;
 
+// Servidor responsável pelo cluster de DADOS.
+// Cada instância:
+//  - entra no grupo "ClusterDados" via JGroups;
+//  - armazena arquivos fisicamente em disco (por UID);
+//  - mantém metadados dos arquivos em ListaArquivos;
+//  - responde comandos vindos do ServidorControle (GET, LIST_USER, SEARCH, DELETE, HASH);
+//  - trata upload, update e replicação de metadados entre nós;
+//  - implementa controle de versão de estado (stateVersion) + sincronização via getState/setState.
 public class ServidorDados extends ReceiverAdapter {
 
     private JChannel canal;
@@ -15,16 +23,16 @@ public class ServidorDados extends ReceiverAdapter {
     private final String DIRETORIO_BASE;
     private final String CAMINHO_ESTADO_DADOS;
 
-    // Controle de versão do estado
+    // Controle de versão do estado local, usado para saber se um nó está defasado
     private long stateVersion = 0;
     private long versaoCoordenador = 0;
 
-    // Lock para sincronização do reingresso
+    // Lock usado por nós secundários para esperar resposta de versão do coordenador
     private final Object stateLock = new Object();
 
 
     public ServidorDados() {
-        // Usa o endereço do próprio canal para gerar um diretório ÚNICO por nó
+        // Usa um ID aleatório para que cada nó tenha seu repositório e arquivo de estado separados.
         String id = java.util.UUID.randomUUID().toString().substring(0, 8);
 
         this.DIRETORIO_BASE = "repositorio_" + id + "/";
@@ -32,6 +40,11 @@ public class ServidorDados extends ReceiverAdapter {
     }
 
 
+    // Inicializa o servidor de dados:
+    //  - carrega estado salvo (se existir)
+    //  - garante diretório base
+    //  - conecta ao cluster "ClusterDados"
+    //  - identifica se é coordenador ou nó secundário
     public void iniciar() throws Exception {
         carregarEstado();
         new File(DIRETORIO_BASE).mkdirs();
@@ -50,15 +63,21 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] ServidorDados conectado ao cluster 'ClusterDados'. Address=" + canal.getAddress());
     }
 
-    /** Incrementa a versão do estado sempre que há modificação */
+    // Incrementa a versão do estado sempre que há modificação
+    // Sempre que a ListaArquivos muda (upload, update, delete), incrementamos stateVersion
+    // para permitir que outros nós saibam se estão desatualizados.
+
     private void incrementarVersao() {
         stateVersion++;
     }
 
-    /** Salva arquivo LOCALMENTE, sem replicação de metadados */
+    // Salva arquivo LOCALMENTE, sem replicação de metadados
+    //  - garante timestamp para o Arquivo (se ainda for 0);
+    //  - registra na ListaArquivos;
+    //  - grava o conteúdo em disco (se tiver);
+    //  - salva o estado em arquivo binário.
     private void salvarArquivoLocal(Arquivo arquivo) throws Exception {
 
-        // *** NOVO ***
         if (arquivo.getTimestamp() == 0) {
             arquivo.setTimestamp(System.currentTimeMillis());
         }
@@ -75,14 +94,17 @@ public class ServidorDados extends ReceiverAdapter {
         salvarEstado();
     }
 
-    /** Chamado apenas pelo nó que recebe o upload real: salva e replica metadado */
+    // Chamado apenas pelo nó que recebe o upload real: salva e replica metadado
+    // Este método é usado apenas para o nó que recebe o arquivo do ServidorControle.
+    //  - salva o arquivo localmente (conteúdo em disco + metadados);
+    //  - cria um Arquivo "meta" sem conteúdo;
+    //  - replica esse metadado para os demais nós do cluster via JGroups.
     public void salvarArquivoComReplicacao(Arquivo arquivo) throws Exception {
 
         salvarArquivoLocal(arquivo);
 
         Arquivo meta = new Arquivo(arquivo.getUid(), arquivo.getNome(), null, arquivo.getUsuario());
 
-        // *** NOVO ***
         meta.setTimestamp(arquivo.getTimestamp());
 
         try {
@@ -95,6 +117,9 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] Arquivo salvo localmente. UID=" + arquivo.getUid());
     }
 
+    // Método principal de recepção de mensagens do cluster de dados.
+    //  - comandos de texto (LIST_USER, GET, DELETE, SEARCH, HASH, STATE_VERSION_REQ/RESP)
+    //  - objetos Arquivo (upload, metadados, updates)
     @Override
     public void receive(Message msg) {
         if (msg.getSrc() != null && msg.getSrc().equals(canal.getAddress())) return;
@@ -110,7 +135,8 @@ public class ServidorDados extends ReceiverAdapter {
 
         System.out.println("[DADOS] receive() de " + msg.getSrc() + " tipo=" + (obj != null ? obj.getClass().getSimpleName() : "NULL"));
 
-        // --- NOVO: tratamento de mensagens de versão de estado ---
+        // Aqui são tratados comandos internos "STATE_VERSION_REQ" e "STATE_VERSION_RESP"
+        // para sincronização de nós reingressantes.
         if (obj instanceof String s) {
 
             // Pedido de versão enviado para o coordenador
@@ -149,6 +175,10 @@ public class ServidorDados extends ReceiverAdapter {
             return;
         }
 
+        // Caso seja um Arquivo, pode ser:
+        //  - upload real (com conteúdo)
+        //  - metadado replicado (sem conteúdo)
+        //  - atualização (update = true)
         if (obj instanceof Arquivo arquivo) {
 
             if (arquivo.isUpdate()) {
@@ -178,8 +208,13 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] Mensagem inesperada: " + (obj != null ? obj.getClass().getName() : "NULL"));
     }
 
-    // *** NOVO ***
-    // Atualização real de arquivo (overwrite)
+    // Atualização real de arquivo (overwrite).
+    // Este método aplica um UPDATE:
+    //  - garante timestamp;
+    //  - ignora updates atrasados;
+    //  - grava novo conteúdo no disco;
+    //  - atualiza ListaArquivos com nova versão;
+    //  - replica metadado atualizado para os outros nós.
     private void atualizarArquivo(Arquivo arquivo) throws Exception {
 
         if (arquivo.getTimestamp() == 0) {
@@ -229,6 +264,13 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] UPDATE aplicado e replicado. UID=" + atualizado.getUid());
     }
 
+    // Trata comandos em texto vindos do ServidorControle (via cluster de dados).
+    // Comandos suportados:
+    //  - LIST_USER;<usuario>
+    //  - GET;<uid>
+    //  - DELETE;<uid>
+    //  - SEARCH;<nome>
+    //  - HASH
     private void tratarComando(String comando, Address remetente) {
         if (comando == null || comando.trim().isEmpty()) return;
         String[] partes = comando.split(";", 2);
@@ -350,12 +392,9 @@ public class ServidorDados extends ReceiverAdapter {
                 break;
             }
 
-            /*
-             *  NOVO COMANDO: HASH
-             *  ---------------------------------------------------
-             *  Quando o ServidorControle solicitar "HASH",
-             *  enviamos o hash dos metadados da ListaArquivos.
-             */
+             // Quando o ServidorControle solicitar "HASH",
+             // Enviamos o hash dos metadados da ListaArquivos.
+
             case "HASH": {
                 try {
                     String hash = listaArquivos.gerarHashMetadados();
@@ -373,6 +412,11 @@ public class ServidorDados extends ReceiverAdapter {
         }
     }
 
+    // Chamado sempre que a visão do cluster muda (entrada/saída de nós).
+    // Aqui o nó:
+    //  - verifica se é coordenador;
+    //  - se NÃO for, pede ao coordenador a versão do estado;
+    //  - se estiver desatualizado, pede o snapshot completo via getState().
     @Override
     public void viewAccepted(View view) {
         System.out.println("[DADOS] Nova view: " + view);
@@ -411,6 +455,7 @@ public class ServidorDados extends ReceiverAdapter {
         }
     }
 
+    // Envia o snapshot completo de ListaArquivos para um nó que chamou getState().
     @Override
     public void getState(OutputStream output) throws Exception {
         synchronized (listaArquivos) {
@@ -420,6 +465,8 @@ public class ServidorDados extends ReceiverAdapter {
         }
     }
 
+    // Recebe snapshot completo de outro nó (coordenador) e substitui o estado local.
+    // Também regrava arquivos em disco para garantir consistência física.
     @Override
     public void setState(InputStream input) throws Exception {
         ObjectInputStream ois = new ObjectInputStream(input);
@@ -440,10 +487,12 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] setState() aplicado. stateVersion=" + stateVersion);
     }
 
+    // Salva o estado da ListaArquivos em disco (arquivo binário).
     private void salvarEstado() {
         if (listaArquivos != null) PersistenciaUtil.salvarObjeto(listaArquivos, CAMINHO_ESTADO_DADOS);
     }
 
+    // Carrega o estado da ListaArquivos do disco, ou cria uma lista vazia se não existir.
     private void carregarEstado() {
         ListaArquivos estado = PersistenciaUtil.carregarObjeto(CAMINHO_ESTADO_DADOS);
         if (estado != null) {
@@ -455,6 +504,8 @@ public class ServidorDados extends ReceiverAdapter {
         }
     }
 
+    // Ponto de entrada para executar um ServidorDados standalone.
+    // Fica rodando até o usuário apertar ENTER no terminal.
     public static void main(String[] args) {
         ServidorDados s = null;
         try {
