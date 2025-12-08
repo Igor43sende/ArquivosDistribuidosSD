@@ -48,8 +48,19 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     private final Map<String, Object> monitoresLock = new HashMap<>();
     private final Map<String, Boolean> lockConcedido = new HashMap<>();
 
+    // ---- NOVO: controle de versão do estado de CONTROLE ----
+    private long stateVersion = 0;        // versão local do estado
+    private long versaoCoordenador = 0;   // versão reportada pelo coordenador
+    private final Object stateLock = new Object(); // para sincronizar recebimento de STATE_VERSION_RESP
+
+
     public ServidorControle() {
         this.listaUsuarios = new ListaUsuarios();
+    }
+
+    // Incrementa a versão sempre que o estado de controle muda
+    private void incrementarVersao() {
+        stateVersion++;
     }
 
     public void iniciar() throws Exception {
@@ -86,7 +97,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     public boolean cadastrarUsuario(String nomeUsuario, String senha) {
         try {
             boolean sucesso = listaUsuarios.cadastrarUsuario(nomeUsuario, senha);
-            if (sucesso) salvarEstado();
+            if (sucesso) {
+                salvarEstado();
+                incrementarVersao(); // NOVO: estado de controle mudou
+            }
             canal.send(new Message(null, "CADASTRO:" + nomeUsuario + ":" + senha));
             return sucesso;
         } catch (Exception e) {
@@ -116,6 +130,11 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             }
 
             System.out.println("[CONTROLE] Upload enviado. UID=" + uid);
+
+            // Opcional: se você considerar que mudanças de arquivos também contam
+            // como parte do "estado global", pode incrementar a versão aqui
+            // incrementarVersao();
+
             return uid;
 
         } catch (Exception e) {
@@ -150,6 +169,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             }
 
             System.out.println("[CONTROLE][UPDATE] Atualização enviada → UID=" + uid + " TS=" + ts);
+
+            // Opcional: idem ao comentário do upload
+            // incrementarVersao();
+
             return true;
 
         } catch (Exception e) {
@@ -159,12 +182,12 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             liberarLockDistribuido(chaveLock);
         }
     }
+
     @Override
     public byte[] downloadArquivo(String uid) {
         synchronized (responseLock) {
             ultimaRespostaDownload = null;
             ultimaRespostaListagem = new ArrayList<>();
-            // ★★ HASH GLOBAL ★★ — este campo será usado só por obterHashGlobal()
             ultimaRespostaHashArquivos = null;
 
             try {
@@ -220,6 +243,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             // 2) envia comando DELETE para o cluster de dados
             canalDados.send(new Message(null, "DELETE;" + uid));
             System.out.println("[CONTROLE] DELETE enviado → UID=" + uid);
+
+            // Opcional: idem upload/update
+            // incrementarVersao();
+
             return true;
 
         } catch (Exception e) {
@@ -281,9 +308,6 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
 
     // ------------------------------------------------------------
     //   Receiver do canal de dados
-    //   - recebe byte[] (download)
-    //   - recebe List<String> (listagem / busca)
-    //   - recebe String (NOT_FOUND ou HASH de arquivos)
     // ------------------------------------------------------------
     private class ReceiverDados extends ReceiverAdapter {
         @SuppressWarnings("unchecked")
@@ -313,19 +337,10 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 //    - hash dos metadados de arquivos (resposta de "HASH")
                 if (o instanceof String s) {
                     synchronized (responseLock) {
-                        // Heurística:
-                        // Se estivermos em um fluxo de HASH (obterHashGlobal vai cuidar disso),
-                        // ele vai olhar especificamente ultimaRespostaHashArquivos.
-                        // Para manter compatibilidade com download, distinguimos:
-                        if ("NOT_FOUND".equals(s) || ultimaRespostaDownload == null) {
-                            // Assume que é resposta de GET (erro) por padrão
+                        if ("NOT_FOUND".equals(s)) {
                             ultimaRespostaDownload = s;
-                            ultimaRespostaListagem = new ArrayList<>();
-                            // não mexe em ultimaRespostaHashArquivos aqui
                         } else {
-                            // Em cenários futuros poderíamos ter prefixo, mas por enquanto
-                            // manteremos simples. A lógica de obterHashGlobal garantirá que
-                            // o valor correto seja lido.
+                            // assumimos que aqui é resposta de HASH
                             ultimaRespostaHashArquivos = s;
                         }
                         responseLock.notifyAll();
@@ -338,9 +353,8 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 if (o instanceof dados.Arquivo arq) {
                     if (arq.getConteudo() != null && arq.getConteudo().length > 0) {
                         synchronized (responseLock) {
-                            ultimaRespostaDownload = arq.getConteudo();
+                            ultimaRespostaDownload = arq;
                             ultimaRespostaListagem = new ArrayList<>();
-                            // não mexe no hash
                             responseLock.notifyAll();
                         }
                         System.out.println("[CONTROLE][DADOS] Arquivo recebido para download. UID=" +
@@ -361,11 +375,9 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             }
         }
     }
+
     // ------------------------------------------------------------
     //   Receiver do canal de CONTROLE
-    //   - trata locks distribuídos
-    //   - replica cadastros de usuários
-    //   - recebe estado via getState/setState
     // ------------------------------------------------------------
     private class ReceiverControle extends ReceiverAdapter {
         @Override
@@ -376,6 +388,33 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 Object o = msg.getObject();
                 if (o instanceof String) {
                     String texto = (String) o;
+
+                    // ---- NOVO: Protocolo de versão de estado ----
+                    if (texto.equals("STATE_VERSION_REQ")) {
+                        if (ehCoordenadorControle()) {
+                            try {
+                                canal.send(new Message(msg.getSrc(), "STATE_VERSION_RESP;" + stateVersion));
+                                System.out.println("[CONTROLE] STATE_VERSION_REQ recebido. Enviando versao=" + stateVersion);
+                            } catch (Exception e) {
+                                System.err.println("[CONTROLE] Erro ao enviar STATE_VERSION_RESP: " + e.getMessage());
+                            }
+                        }
+                        return;
+                    }
+
+                    if (texto.startsWith("STATE_VERSION_RESP;")) {
+                        try {
+                            String[] p = texto.split(";", 2);
+                            versaoCoordenador = Long.parseLong(p[1]);
+                            System.out.println("[CONTROLE] STATE_VERSION_RESP recebido. versaoCoordenador=" + versaoCoordenador);
+                        } catch (Exception e) {
+                            System.err.println("[CONTROLE] Erro ao parsear STATE_VERSION_RESP: " + e.getMessage());
+                        }
+                        synchronized (stateLock) {
+                            stateLock.notifyAll();
+                        }
+                        return;
+                    }
 
                     // ---- Protocolo de lock distribuído ----
                     if (texto.startsWith("LOCK_REQ:")) {
@@ -406,6 +445,7 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                         if (p.length >= 3) {
                             listaUsuarios.cadastrarUsuario(p[1], p[2]);
                             salvarEstado();
+                            incrementarVersao(); // NOVO: replica também conta como mudança de estado
                             System.out.println("[CONTROLE][CTRL] Cadastro replicado: " + p[1]);
                         }
                         return;
@@ -417,6 +457,8 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
                 if (o instanceof ListaUsuarios) {
                     listaUsuarios = (ListaUsuarios) o;
                     salvarEstado();
+                    // recebemos snapshot do coordenador → alinhamos nossa versão com a dele
+                    stateVersion = versaoCoordenador;
                     System.out.println("[CONTROLE][CTRL] Estado de usuarios recebido e aplicado.");
                     return;
                 }
@@ -429,6 +471,41 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         @Override
         public void viewAccepted(View view) {
             System.out.println("[CONTROLE][CTRL] Nova view: " + view);
+
+            boolean souCoordenador = ehCoordenadorControle();
+            if (souCoordenador) {
+                System.out.println("[CONTROLE][CTRL] Eu sou o coordenador do cluster de controle.");
+                return;
+            }
+
+            // Nó secundário: verifica se está desatualizado em relação ao coordenador
+            try {
+                Address coord = view.getMembers().get(0);
+                if (coord == null) return;
+
+                // pede versão de estado ao coordenador
+                canal.send(new Message(coord, "STATE_VERSION_REQ"));
+                System.out.println("[CONTROLE][CTRL] STATE_VERSION_REQ enviado ao coordenador...");
+
+                synchronized (stateLock) {
+                    stateLock.wait(1000); // espera até 1s pela resposta
+                }
+
+                System.out.println("[CONTROLE][CTRL] Minha stateVersion=" + stateVersion +
+                        " | versaoCoordenador=" + versaoCoordenador);
+
+                if (versaoCoordenador > stateVersion) {
+                    System.out.println("[CONTROLE][CTRL] Estou desatualizado. Solicitando getState()...");
+                    canal.getState(null, 5000);
+                } else {
+                    System.out.println("[CONTROLE][CTRL] Estado já sincronizado ou não há diferença relevante.");
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                System.err.println("[CONTROLE][CTRL] Erro ao sincronizar estado: " + e.getMessage());
+            }
         }
     }
 
@@ -449,6 +526,9 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
         ObjectInputStream ois = new ObjectInputStream(in);
         listaUsuarios = (ListaUsuarios) ois.readObject();
         salvarEstado();
+        // Se setState foi chamado, provavelmente viemos de um getState solicitado
+        // após receber STATE_VERSION_RESP; alinhamos com versaoCoordenador
+        stateVersion = versaoCoordenador;
         System.out.println("[CONTROLE] Estado de usuarios restaurado via getState/setState.");
     }
 
@@ -463,6 +543,7 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
             System.out.println("[CONTROLE] Estado de usuarios carregado do disco.");
         }
     }
+
     // ------------------------------------------------------------
     //   ★★ HASH GLOBAL ★★
     // ------------------------------------------------------------
