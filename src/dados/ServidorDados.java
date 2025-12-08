@@ -15,6 +15,14 @@ public class ServidorDados extends ReceiverAdapter {
     private final String DIRETORIO_BASE;
     private final String CAMINHO_ESTADO_DADOS;
 
+    // Controle de versão do estado
+    private long stateVersion = 0;
+    private long versaoCoordenador = 0;
+
+    // Lock para sincronização do reingresso
+    private final Object stateLock = new Object();
+
+
     public ServidorDados() {
         // Usa o endereço do próprio canal para gerar um diretório ÚNICO por nó
         String id = java.util.UUID.randomUUID().toString().substring(0, 8);
@@ -32,14 +40,19 @@ public class ServidorDados extends ReceiverAdapter {
         canal.setReceiver(this);
         canal.connect("ClusterDados");
 
-        if (!canal.getAddress().equals(canal.getView().getMembers().get(0))) {
-            System.out.println("[DADOS] Solicitando estado do cluster...");
-            canal.getState(null, 10000);
-        } else {
+        boolean souCoordenador = canal.getAddress().equals(canal.getView().getMembers().get(0));
+        if (souCoordenador) {
             System.out.println("[DADOS] Coordenador inicial do grupo.");
+        } else {
+            System.out.println("[DADOS] Nó secundário conectado ao cluster 'ClusterDados'.");
         }
 
         System.out.println("[DADOS] ServidorDados conectado ao cluster 'ClusterDados'. Address=" + canal.getAddress());
+    }
+
+    /** Incrementa a versão do estado sempre que há modificação */
+    private void incrementarVersao() {
+        stateVersion++;
     }
 
     /** Salva arquivo LOCALMENTE, sem replicação de metadados */
@@ -51,6 +64,7 @@ public class ServidorDados extends ReceiverAdapter {
         }
 
         listaArquivos.adicionarArquivo(arquivo);
+        incrementarVersao(); // estado mudou
 
         if (arquivo.getConteudo() != null && arquivo.getConteudo().length > 0) {
             try (FileOutputStream fos = new FileOutputStream(DIRETORIO_BASE + arquivo.getUid())) {
@@ -96,8 +110,42 @@ public class ServidorDados extends ReceiverAdapter {
 
         System.out.println("[DADOS] receive() de " + msg.getSrc() + " tipo=" + (obj != null ? obj.getClass().getSimpleName() : "NULL"));
 
-        if (obj instanceof String comando) {
-            tratarComando(comando, msg.getSrc());
+        // --- NOVO: tratamento de mensagens de versão de estado ---
+        if (obj instanceof String s) {
+
+            // Pedido de versão enviado para o coordenador
+            if (s.equals("STATE_VERSION_REQ")) {
+                // Apenas o coordenador responde
+                Address coordenador = canal.getView().getMembers().get(0);
+                if (canal.getAddress().equals(coordenador)) {
+                    try {
+                        Message resp = new Message(msg.getSrc(), "STATE_VERSION_RESP;" + stateVersion);
+                        canal.send(resp);
+                        System.out.println("[DADOS] STATE_VERSION_REQ recebido. Enviando versao=" + stateVersion + " para " + msg.getSrc());
+                    } catch (Exception e) {
+                        System.err.println("[DADOS] Erro ao enviar STATE_VERSION_RESP: " + e.getMessage());
+                    }
+                }
+                return;
+            }
+
+            // Resposta do coordenador para o nó reingressante
+            if (s.startsWith("STATE_VERSION_RESP;")) {
+                try {
+                    String[] p = s.split(";", 2);
+                    versaoCoordenador = Long.parseLong(p[1]);
+                    System.out.println("[DADOS] STATE_VERSION_RESP recebido. versaoCoordenador=" + versaoCoordenador);
+                } catch (Exception e) {
+                    System.err.println("[DADOS] Erro ao parsear STATE_VERSION_RESP: " + e.getMessage());
+                }
+                synchronized (stateLock) {
+                    stateLock.notifyAll();
+                }
+                return;
+            }
+
+            // Caso não seja comando de versão de estado, trata como comando normal
+            tratarComando(s, msg.getSrc());
             return;
         }
 
@@ -166,6 +214,7 @@ public class ServidorDados extends ReceiverAdapter {
         atualizado.setTimestamp(arquivo.getTimestamp());
 
         listaArquivos.atualizarArquivo(atualizado);
+        incrementarVersao(); // estado mudou
         salvarEstado();
 
         Arquivo meta = new Arquivo(
@@ -190,6 +239,7 @@ public class ServidorDados extends ReceiverAdapter {
         switch (acao) {
 
             case "UPDATE": {
+                // não usado diretamente aqui, update vem como Arquivo.isUpdate()
                 break;
             }
 
@@ -273,6 +323,7 @@ public class ServidorDados extends ReceiverAdapter {
                 boolean r = listaArquivos.removerPorUid(uid);
                 if (r) {
                     try { Files.deleteIfExists(Paths.get(DIRETORIO_BASE + uid)); } catch (IOException ignored) {}
+                    incrementarVersao(); // estado mudou
                     salvarEstado();
                     System.out.println("[DADOS] DELETE OK UID=" + uid);
                 } else {
@@ -325,11 +376,38 @@ public class ServidorDados extends ReceiverAdapter {
     @Override
     public void viewAccepted(View view) {
         System.out.println("[DADOS] Nova view: " + view);
-        boolean souCoordenador = canal.getAddress().equals(canal.getView().getMembers().get(0));
-        if (!souCoordenador) {
-            try { canal.getState(null, 5000); } catch (Exception e) { System.err.println(e.getMessage()); }
-        } else {
+        boolean souCoordenador = view.getMembers().get(0).equals(canal.getAddress());
+
+        if (souCoordenador) {
             System.out.println("[DADOS] Eu sou o coordenador do cluster.");
+            return;
+        }
+
+        try {
+            // 1) Solicita a versão do estado ao coordenador
+            Address coordenador = view.getMembers().get(0);
+            Message req = new Message(coordenador, "STATE_VERSION_REQ");
+            canal.send(req);
+            System.out.println("[DADOS] Solicitando versao de estado ao coordenador " + coordenador);
+
+            // 2) Aguarda resposta
+            synchronized (stateLock) {
+                stateLock.wait(1000); // até 1 segundo
+            }
+
+            System.out.println("[DADOS] Minha stateVersion=" + stateVersion + " | versaoCoordenador=" + versaoCoordenador);
+
+            // 3) Se estiver desatualizado, pede snapshot
+            if (versaoCoordenador > stateVersion) {
+                System.out.println("[DADOS] Estado desatualizado. Solicitando snapshot via getState()...");
+                canal.getState(null, 5000);
+            } else {
+                System.out.println("[DADOS] Estado já sincronizado ou não há diferença relevante.");
+            }
+
+        } catch (Exception e) {
+            System.err.println("[DADOS] Erro ao sincronizar estado no viewAccepted: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -346,7 +424,11 @@ public class ServidorDados extends ReceiverAdapter {
     public void setState(InputStream input) throws Exception {
         ObjectInputStream ois = new ObjectInputStream(input);
         ListaArquivos estado = (ListaArquivos) ois.readObject();
-        synchronized (listaArquivos) { listaArquivos = estado; }
+        synchronized (listaArquivos) {
+            listaArquivos = estado;
+            // ao receber snapshot do coordenador, iguala a versão local à dele
+            stateVersion = versaoCoordenador;
+        }
         salvarEstado();
         for (Arquivo a : listaArquivos.listarArquivos()) {
             if (a.getConteudo() != null && a.getConteudo().length > 0) {
@@ -355,6 +437,7 @@ public class ServidorDados extends ReceiverAdapter {
                 } catch (IOException ignored) {}
             }
         }
+        System.out.println("[DADOS] setState() aplicado. stateVersion=" + stateVersion);
     }
 
     private void salvarEstado() {
