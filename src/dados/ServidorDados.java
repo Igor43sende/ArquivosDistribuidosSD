@@ -6,7 +6,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.ArrayList;
-import java.util.stream.Collectors;
 import util.PersistenciaUtil;
 
 public class ServidorDados extends ReceiverAdapter {
@@ -34,18 +33,25 @@ public class ServidorDados extends ReceiverAdapter {
         System.out.println("[DADOS] ServidorDados conectado ao cluster 'ClusterDados'. Address=" + canal.getAddress());
     }
 
-    public void salvarArquivo(Arquivo arquivo) throws Exception {
-        // adiciona à lista
+    /** Salva arquivo LOCALMENTE, sem replicação de metadados */
+    private void salvarArquivoLocal(Arquivo arquivo) throws Exception {
         listaArquivos.adicionarArquivo(arquivo);
-        // salva fisicamente
+
         if (arquivo.getConteudo() != null && arquivo.getConteudo().length > 0) {
             try (FileOutputStream fos = new FileOutputStream(DIRETORIO_BASE + arquivo.getUid())) {
                 fos.write(arquivo.getConteudo());
             }
         }
-        salvarEstado();
 
-        // replicar metadados para o cluster (multicast) — envia cópia sem conteúdo para economizar banda
+        salvarEstado();
+    }
+
+    /** Chamado apenas pelo nó que recebe o upload real: salva e replica metadado */
+    public void salvarArquivoComReplicacao(Arquivo arquivo) throws Exception {
+        // salva localmente
+        salvarArquivoLocal(arquivo);
+
+        // replicar metadados para o cluster (multicast) — cópia sem conteúdo
         Arquivo meta = new Arquivo(arquivo.getUid(), arquivo.getNome(), null, arquivo.getUsuario());
         try {
             canal.send(new Message(null, meta));
@@ -62,7 +68,7 @@ public class ServidorDados extends ReceiverAdapter {
         // Evitar eco (não processar mensagens originadas por este mesmo nó)
         if (msg.getSrc() != null && msg.getSrc().equals(canal.getAddress())) return;
 
-        Object obj = null;
+        Object obj;
         try {
             obj = msg.getObject();
         } catch (Exception e) {
@@ -71,7 +77,6 @@ public class ServidorDados extends ReceiverAdapter {
             return;
         }
 
-        // Debug: mostrar que mensagem chegou
         System.out.println("[DADOS] receive() de " + msg.getSrc() + " tipo=" + (obj != null ? obj.getClass().getSimpleName() : "NULL"));
 
         if (obj instanceof String comando) {
@@ -80,12 +85,18 @@ public class ServidorDados extends ReceiverAdapter {
         }
 
         if (obj instanceof Arquivo arquivo) {
-            // Quando receber arquivo (upload), ele pode vir com conteúdo
             try {
-                salvarArquivo(arquivo);
-                System.out.println("[DADOS] Arquivo recebido e salvo. UID=" + arquivo.getUid());
+                if (arquivo.getConteudo() != null && arquivo.getConteudo().length > 0) {
+                    // 🔹 Upload real vindo do controle → salva e replica metadado
+                    salvarArquivoComReplicacao(arquivo);
+                    System.out.println("[DADOS] Arquivo recebido (com conteúdo) e salvo. UID=" + arquivo.getUid());
+                } else {
+                    // 🔹 Metadado replicado → só atualiza lista, NÃO replica de novo!
+                    salvarArquivoLocal(arquivo);
+                    System.out.println("[DADOS] Metadado recebido e aplicado. UID=" + arquivo.getUid());
+                }
             } catch (Exception e) {
-                System.err.println("[DADOS] Erro ao salvar arquivo recebido: " + e.getMessage());
+                System.err.println("[DADOS] Erro ao salvar arquivo/metadado recebido: " + e.getMessage());
                 e.printStackTrace();
             }
             return;
@@ -120,6 +131,7 @@ public class ServidorDados extends ReceiverAdapter {
                 }
                 break;
             }
+
             case "GET": {
                 String uid = partes.length > 1 ? partes[1].trim() : "";
                 System.out.println("[DADOS] GET solicitado UID=" + uid + " por " + remetente);
@@ -128,12 +140,10 @@ public class ServidorDados extends ReceiverAdapter {
                 boolean encontrado = false;
 
                 if (a != null) {
-                    // se o objeto já tem conteúdo em memória
                     if (a.getConteudo() != null && a.getConteudo().length > 0) {
                         conteudo = a.getConteudo();
                         encontrado = true;
                     } else {
-                        // tenta ler do disco
                         try {
                             java.nio.file.Path p = Paths.get(DIRETORIO_BASE + uid);
                             if (Files.exists(p)) {
@@ -149,14 +159,22 @@ public class ServidorDados extends ReceiverAdapter {
 
                 try {
                     if (encontrado && conteudo != null) {
-                        Message m = new Message(remetente, conteudo);
+                        // Enviar um Arquivo SERIALIZADO com o conteúdo dentro
+                        Arquivo resposta = new Arquivo(
+                                uid,
+                                a != null ? a.getNome() : "desconhecido",
+                                conteudo,
+                                a != null ? a.getUsuario() : null
+                        );
+                        Message m = new Message(remetente, resposta);
                         canal.send(m);
-                        System.out.println("[DADOS] Enviado conteúdo UID=" + uid + " para " + remetente + " bytes=" + (conteudo != null ? conteudo.length : 0));
+                        System.out.println("[DADOS] Enviado Arquivo UID=" + uid +
+                                " para " + remetente + " bytes=" + conteudo.length);
                     } else {
-                        // enviar mensagem explícita de não-encontrado para que o controlador trate isso
                         Message m = new Message(remetente, "NOT_FOUND");
                         canal.send(m);
-                        System.out.println("[DADOS] Arquivo UID=" + uid + " não encontrado. Enviado NOT_FOUND para " + remetente);
+                        System.out.println("[DADOS] Arquivo UID=" + uid +
+                                " não encontrado. Enviado NOT_FOUND para " + remetente);
                     }
                 } catch (Exception e) {
                     System.err.println("[DADOS] Erro ao enviar GET: " + e.getMessage());
@@ -164,6 +182,7 @@ public class ServidorDados extends ReceiverAdapter {
                 }
                 break;
             }
+
             case "DELETE": {
                 String uid = partes.length > 1 ? partes[1].trim() : "";
                 System.out.println("[DADOS] DELETE solicitado UID=" + uid + " por " + remetente);
@@ -202,7 +221,6 @@ public class ServidorDados extends ReceiverAdapter {
     @Override
     public void viewAccepted(View view) {
         System.out.println("[DADOS] Nova view: " + view);
-        // solicitar estado se não for coordenador
         boolean souCoordenador = canal.getAddress().equals(canal.getView().getMembers().get(0));
         if (!souCoordenador) {
             try { canal.getState(null, 5000); } catch (Exception e) { System.err.println(e.getMessage()); }
@@ -226,7 +244,6 @@ public class ServidorDados extends ReceiverAdapter {
         ListaArquivos estado = (ListaArquivos) ois.readObject();
         synchronized (listaArquivos) { listaArquivos = estado; }
         salvarEstado();
-        // reconstruir arquivos físicos se houver conteúdo
         for (Arquivo a : listaArquivos.listarArquivos()) {
             if (a.getConteudo() != null && a.getConteudo().length > 0) {
                 try (FileOutputStream fos = new FileOutputStream(DIRETORIO_BASE + a.getUid())) {

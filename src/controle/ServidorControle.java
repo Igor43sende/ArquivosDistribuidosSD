@@ -12,6 +12,7 @@ import java.util.ArrayList;
 
 import util.PersistenciaUtil;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ObjectInputStream;
@@ -191,77 +192,67 @@ public class ServidorControle extends ReceiverAdapter implements IControle {
     }
 
     // Receiver do canal de dados: recebe byte[] e List<String>
-    // Receiver do canal de dados: recebe byte[] e List<String>
     private class ReceiverDados extends ReceiverAdapter {
         @SuppressWarnings("unchecked")
         @Override
         public void receive(Message msg) {
-            // evita processar mensagens originadas por este mesmo nó
-            if (msg.getSrc() != null && msg.getSrc().equals(canalDados.getAddress())) return;
+            if (msg.getSrc() != null && msg.getSrc().equals(canalDados.getAddress()))
+                return;
 
             try {
-                // 1) Tentar ler buffer binário (usado para enviar conteúdo de arquivo)
-                byte[] buf = msg.getBuffer();
-                if (buf != null && buf.length > 0) {
-                    synchronized (responseLock) {
-                        ultimaRespostaDownload = buf;
-                        responseLock.notifyAll();
-                    }
-                    System.out.println("[CONTROLE][DADOS] byte[] recebido (" + buf.length + " bytes) de " + msg.getSrc());
-                    return;
-                }
-
-                // 2) Se não havia buffer, tentar desserializar objeto (String, List, Arquivo, etc)
-                Object o = null;
-                try {
-                    o = msg.getObject();
-                } catch (Throwable t) {
-                    // falha ao desserializar: log e sair (não notifica o lock porque não temos resposta válida)
-                    System.err.println("[CONTROLE][DADOS] Falha ao desserializar objeto de " + msg.getSrc() + ": " + t.getMessage());
-                    t.printStackTrace();
-                    return;
-                }
-
+                Object o = msg.getObject();
                 if (o == null) return;
 
-                // resposta para LIST/SEARCH -> lista de strings (uid;nome)
-                if (o instanceof List<?>) {
-                    List<String> lista = (List<String>) o;
+                // 1) LIST_USER / SEARCH → lista de strings (uid;nome)
+                if (o instanceof List<?> lista) {
                     synchronized (responseLock) {
-                        ultimaRespostaListagem = new ArrayList<>(lista);
+                        ultimaRespostaListagem = new ArrayList<>((List<String>) lista);
+                        ultimaRespostaDownload = null;
                         responseLock.notifyAll();
                     }
-                    System.out.println("[CONTROLE][DADOS] Lista recebida de " + msg.getSrc() + ". itens=" + lista.size());
+                    System.out.println("[CONTROLE][DADOS] Lista recebida. itens=" + lista.size());
                     return;
                 }
 
-                // resposta textual (ex.: NOT_FOUND ou mensagens de erro)
-                if (o instanceof String) {
-                    String s = (String) o;
+                // 2) NOT_FOUND ou mensagem textual
+                if (o instanceof String s) {
                     synchronized (responseLock) {
                         ultimaRespostaDownload = s;
+                        ultimaRespostaListagem = new ArrayList<>();
                         responseLock.notifyAll();
                     }
-                    System.out.println("[CONTROLE][DADOS] String recebida de " + msg.getSrc() + ": " + s);
+                    System.out.println("[CONTROLE][DADOS] String recebida: " + s);
                     return;
                 }
 
-                // se receberem um objeto Arquivo (metadata replicada), apenas logar ou atualizar cache
-                if (o instanceof dados.Arquivo) {
-                    dados.Arquivo arq = (dados.Arquivo) o;
-                    System.out.println("[CONTROLE][DADOS] Metadado Arquivo recebido de " + msg.getSrc() + ": UID=" + arq.getUid() + " nome=" + arq.getNome());
-                    // opcional: atualizar lista/cache de metadados se desejar
+                // 3) Arquivo vindo do cluster de dados
+                if (o instanceof dados.Arquivo arq) {
+                    if (arq.getConteudo() != null && arq.getConteudo().length > 0) {
+                        // 🔹 É a resposta do DOWNLOAD
+                        synchronized (responseLock) {
+                            ultimaRespostaDownload = arq.getConteudo();
+                            ultimaRespostaListagem = new ArrayList<>();
+                            responseLock.notifyAll();
+                        }
+                        System.out.println("[CONTROLE][DADOS] Arquivo recebido para download. UID=" +
+                                arq.getUid() + " bytes=" + arq.getConteudo().length);
+                    } else {
+                        // 🔹 Metadado replicado (sem conteúdo) – só loga
+                        System.out.println("[CONTROLE][DADOS] Metadado Arquivo recebido: UID=" +
+                                arq.getUid() + " nome=" + arq.getNome());
+                    }
                     return;
                 }
 
-                System.out.println("[CONTROLE][DADOS] Mensagem inesperada de " + msg.getSrc() + ": " + o.getClass().getName());
+                // 4) Qualquer outra coisa
+                System.out.println("[CONTROLE][DADOS] Objeto inesperado: " + o.getClass());
+
             } catch (Exception e) {
                 System.err.println("[CONTROLE][DADOS] Erro ao processar mensagem: " + e.getMessage());
                 e.printStackTrace();
             }
         }
     }
-
 
 
     // Receiver do canal controle
