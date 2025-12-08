@@ -10,15 +10,11 @@
     <FD_ALL/>
     <VERIFY_SUSPECT/>
     <CENTRAL_LOCK/>
-    <SEQUENCER/>
+
     <pbcast.NAKACK2/>
     <UNICAST3/>
     <pbcast.STABLE/>
     <pbcast.GMS print_local_addr="true"/>
     <pbcast.STATE_TRANSFER/>
-
-    <!-- REMOVIDO <serialization> -->
-    <!-- REMOVIDO <SERIALIZATION> -->
-    <!-- REMOVIDO <FRAG2> -->
 
 </config>

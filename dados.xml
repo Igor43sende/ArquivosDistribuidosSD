@@ -14,10 +14,4 @@
     <pbcast.STABLE/>
     <pbcast.GMS print_local_addr="true"/>
     <pbcast.STATE_TRANSFER/>
-    <SEQUENCER/>
-
-    <!-- REMOVIDO <serialization> -->
-    <!-- REMOVIDO <SERIALIZATION> -->
-    <!-- REMOVIDO <FRAG2> -->
-
 </config>
