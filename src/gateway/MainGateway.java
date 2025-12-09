@@ -6,24 +6,16 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.util.Scanner;
 
-/**
- * MainGateway
- *
- * Este é o PONTO DE ENTRADA do sistema do lado do servidor.
- * Ele inicia:
- *
- *  1. O ServidorControle (cluster JGroups: autenticação, locks, operações)
- *  2. O RMI Registry (porta 1099), se ainda não existir
- *  3. O Gateway, que expõe as operações via RMI para os clientes
- *
- * Depois disso, a aplicação permanece ativa até ENTER ser pressionado.
- *
- * Em resumo: este arquivo integra o mundo RMI com o mundo JGroups.
- */
 public class MainGateway {
 
     public static void main(String[] args) {
         try {
+            // ============================================================
+            // DEFINIÇÃO DO HOSTNAME EXTERNO PARA RMI
+            // ============================================================
+            System.setProperty("java.rmi.server.hostname", "192.168.15.4");
+            // TROQUE PELO SEU IP REAL DA REDE
+
             // ------------------------------------------------------------
             // 1) Subida do ServidorControle
             // ------------------------------------------------------------
@@ -43,11 +35,9 @@ public class MainGateway {
             System.out.println("[MainGateway] Criando/obtendo Registry RMI na porta 1099...");
             Registry registry;
             try {
-                // Tenta criar o registry — funciona apenas se nenhum registry estiver rodando.
                 registry = LocateRegistry.createRegistry(1099);
                 System.out.println("[MainGateway] Registry criado na porta 1099.");
             } catch (Exception ex) {
-                // Se já existe, ele simplesmente obtém sua referência.
                 System.out.println("[MainGateway] Registry já existente. Obtendo referência...");
                 registry = LocateRegistry.getRegistry(1099);
             }
@@ -64,7 +54,7 @@ public class MainGateway {
             System.out.println("\n=================================================");
             System.out.println("   Gateway ONLINE e registrado no RMI Registry   ");
             System.out.println("   Nome do serviço: Gateway                      ");
-            System.out.println("   Porta: 1099                                   ");
+            System.out.println("   Endereço: rmi://192.168.15.4/Gateway     ");
             System.out.println("=================================================\n");
 
             // ------------------------------------------------------------
