@@ -41,7 +41,13 @@ public class Cliente {
 
         // Conexão com o Gateway via RMI
         try {
-            gateway = (IGateway) Naming.lookup("rmi://localhost/Gateway");
+            // ==========================================
+            // ALTERAÇÃO NECESSÁRIA PARA MÁQUINAS REMOTAS
+            // ==========================================
+            gateway = (IGateway) Naming.lookup("rmi://192.168.15.4:1099/Gateway");
+            // Exemplo real:
+            // gateway = (IGateway) Naming.lookup("rmi://192.168.15.4:1099/Gateway");
+
             System.out.println("Cliente conectado ao Gateway via RMI.");
         } catch (Exception e) {
             System.err.println("Erro ao conectar ao RMI: " + e.getMessage());
@@ -118,8 +124,7 @@ public class Cliente {
     }
 
 
-     // Exibe menu principal.
-
+    // Exibe menu principal.
     private static void exibirMenu() {
         System.out.println("\n===== MENU =====");
         System.out.println("1 - Cadastrar Usuário");
@@ -159,7 +164,6 @@ public class Cliente {
         String senha = scanner.nextLine();
 
         try {
-            // Login é sempre validado no ServidorControle via RMI
             if (gateway.autenticarUsuario(nome, senha)) {
                 usuarioLogado = nome;
                 System.out.println("Login realizado com sucesso.");
@@ -233,7 +237,6 @@ public class Cliente {
         String uid = scanner.nextLine();
 
         try {
-            // Solicita ao ServidorControle → ServidorDados → retorna byte[]
             byte[] conteudo = gateway.downloadArquivo(uid);
 
             if (conteudo != null && conteudo.length > 0) {
@@ -263,9 +266,7 @@ public class Cliente {
         try {
             boolean sucesso = gateway.excluirArquivo(uidExcluir);
 
-            System.out.println(
-                    sucesso ? "Arquivo excluído com sucesso." : "Falha ao excluir arquivo."
-            );
+            System.out.println(sucesso ? "Arquivo excluído com sucesso." : "Falha ao excluir arquivo.");
 
         } catch (Exception e) {
             System.err.println("Falha ao excluir arquivo: " + e.getMessage());
@@ -301,14 +302,6 @@ public class Cliente {
     // UPDATE
     // ------------------------------
 
-    /**
-     * UPDATE é a operação mais complexa porque:
-     *  - o Cliente envia novo conteúdo
-     *  - o Gateway envia para ServidorControle
-     *  - ServidorControle faz lock distribuído
-     *  - envia Arquivo.update=true para ServidorDados
-     *  - nós de dados sincronizam timestamps
-     */
     private static void atualizarArquivo(Scanner scanner) {
         if (!usuarioLogadoOK()) return;
 
@@ -330,9 +323,7 @@ public class Cliente {
 
             boolean sucesso = gateway.atualizarArquivo(uid, novoConteudo);
 
-            System.out.println(
-                    sucesso ? "Arquivo atualizado com sucesso!" : "Falha ao atualizar arquivo."
-            );
+            System.out.println(sucesso ? "Arquivo atualizado com sucesso!" : "Falha ao atualizar arquivo.");
 
         } catch (Exception e) {
             System.err.println("Erro ao atualizar arquivo: " + e.getMessage());
