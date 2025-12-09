@@ -2,10 +2,10 @@
 <config>
 
     <!-- Protocolo base TCP -->
-    <TCP bind_addr="192.168.15.4" bind_port="7800"/>
+    <TCP bind_addr="192.168.15.4" bind_port="7801"/>
 
     <!-- Descoberta estática sem parâmetros adicionais inválidos -->
-    <TCPPING initial_hosts="192.168.15.4[7800],192.168.15.4[7801]" port_range="2"/>
+    <TCPPING initial_hosts="192.168.15.4[7801],192.168.15.10[7801]" port_range="2"/>
 
     <MERGE3/>
     <FD_SOCK/>
